@@ -1,0 +1,93 @@
+name: pston-local
+x-environment: &environment
+  WEB_ORIGIN: http://localhost:3000
+  HOST: 0.0.0.0
+  PSTON_MODE: demo
+  NODE_ENV: development
+  PSTON_DATA_DIR: /data
+  IDENTITY_URL: http://identity:3001
+  DOCUMENTS_URL: http://documents:3002
+  SIGNING_URL: http://signing:3003
+  AUDIT_URL: http://audit:3004
+x-service: &service
+  image: pston-local:dev
+  build: .
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=268435456,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  pids_limit: 80
+  mem_limit: 1g
+  healthcheck:
+    test: [CMD, node, scripts/health.mjs]
+    interval: 15s
+    timeout: 5s
+    start_period: 15s
+    retries: 3
+  depends_on:
+    bootstrap:
+      condition: service_completed_successfully
+services:
+  bootstrap:
+    image: pston-local:dev
+    build: .
+    command: [node, scripts/setup.mjs, --split-volumes]
+    environment:
+      PSTON_DATA_DIR: /bootstrap
+    restart: 'no'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - gateway-data:/bootstrap/gateway
+      - identity-data:/bootstrap/identity
+      - documents-data:/bootstrap/documents
+      - signing-data:/bootstrap/signing
+      - audit-data:/bootstrap/audit
+  gateway:
+    <<: *service
+    command: [node, dist/services/gateway/index.js]
+    environment:
+      <<: *environment
+      SERVICE: gateway
+    ports: ['127.0.0.1:3000:3000']
+    volumes: [gateway-data:/data]
+  identity:
+    <<: *service
+    command: [node, dist/services/identity/index.js]
+    environment:
+      <<: *environment
+      SERVICE: identity
+    volumes: [identity-data:/data]
+  documents:
+    <<: *service
+    command: [node, dist/services/documents/index.js]
+    environment:
+      <<: *environment
+      SERVICE: documents
+    mem_limit: 2g
+    volumes: [documents-data:/data]
+  signing:
+    <<: *service
+    command: [node, dist/services/signing/index.js]
+    environment:
+      <<: *environment
+      SERVICE: signing
+    volumes: [signing-data:/data]
+  audit:
+    <<: *service
+    command: [node, dist/services/audit/index.js]
+    environment:
+      <<: *environment
+      SERVICE: audit
+    volumes: [audit-data:/data]
+volumes:
+  gateway-data:
+  identity-data:
+  documents-data:
+  signing-data:
+  audit-data:

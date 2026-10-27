@@ -1,0 +1,8 @@
+node_modules
+dist
+.local
+package-lock.json
+*.xlsx
+assets/fonts
+test-results
+playwright-report
