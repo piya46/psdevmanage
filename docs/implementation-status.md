@@ -8,7 +8,13 @@
 
 เพิ่มหน้า P12/PFX import ตามคำขอผู้ใช้: อ่านและ wrap กุญแจใน browser worker, ส่งเฉพาะ public certificate และ wrapped key ไป Cloud HSM, ผูก owner/fingerprint/key version และอนุมัติ PDF ด้วย Passkey ก่อนลงนามจริง ตรวจ TDID G3/NRCA G1 chain, KeyUsage/EKU, validity และ signed CRLs; หากตรวจไม่ได้จะหยุด ไม่มี raw private key/password ใน API, DB หรือ app env
 
-ผ่าน `npm run check`: TypeScript, ESLint, unit/integration 54 tests และ build; ผ่าน Chrome E2E ของ build จริง 4 cases รวมรหัส P12 ผิดต้องไม่ส่ง request, browser wrapping ที่ unwrap/เทียบ public key ได้, Passkey approval และ signed download ทดสอบ KMS transport ด้วย fixture และตรวจ detached CMS/CAdES แบบอิสระด้วย OpenSSL แล้ว ผล Cloud HSM จริงและ deployment รอบนี้กำลังตรวจ จึงยังไม่ถือว่าผ่านจาก tests จำลองเพียงอย่างเดียว
+ผ่าน `npm run check`: TypeScript, ESLint, unit/integration 54 tests และ build; ผ่าน Chrome E2E ของ build จริง 4 cases รวมรหัส P12 ผิดต้องไม่ส่ง request, browser wrapping ที่ unwrap/เทียบ public key ได้, Passkey approval และ signed download ทดสอบ KMS transport ด้วย fixture และตรวจ detached CMS/CAdES แบบอิสระด้วย OpenSSL แล้ว
+
+Cloud HSM จริงผ่านด้วย job `pston-hsm-probe-0b8451-4b99f` ที่ใช้ Signing service account: browser P12 wrap → HSM import → public key match/CRC32C → HSM sign → OpenSSL CMS/CAdES verify และตรวจลายเซ็น/อายุ CRL ของ TDID/NRCA จาก Cloud Run โดยใช้ใบรับรอง fixture ที่สร้างใหม่ ไม่ใช่ใบรับรองของผู้ใช้ ลบ job ทดสอบแล้ว และ key version fixture อยู่ใน `DESTROY_SCHEDULED` ไม่สามารถใช้ลงนามได้
+
+Deploy release `20261029184523542-f244c3` ครบ 5 บริการแล้วที่ https://pston-prod-gateway-874466691788.asia-southeast1.run.app; `PSTON_SIGNING_PROVIDER=google-cloud-hsm`, key ring `pston-prod-tdid`, custom IAM role จำกัด Signing SA เฉพาะ ring และเปิด KMS Data Access logs รัน init DB ซ้ำสำเร็จโดยคงข้อมูลเดิม และผ่าน deployment readiness/auth probes หลักฐานอยู่ใน `.local/gcp-deploy/piyawebs/asia-southeast1/pston-prod/` (`last-deployment.json`, `hsm-proof.json`)
+
+Chrome smoke ของ release นี้ไม่มี JavaScript error และไปถึง Google sign-in ได้ `/ready` ตอบ release ถูกต้อง, documents/import API ตอบ 401 เมื่อไม่ login และ internal services ทั้ง 4 ตอบ 403 เมื่อไม่มี IAM หลักฐาน `hsm-deployment-verification.json` และ `hsm-release-login.png` ยังไม่ได้กรอก Google credentials หรือใช้ใบรับรองผู้ใช้ใน smoke test นี้
 
 ใบรับรอง TDID ของผู้ใช้ยังไม่ได้ถูกนำเข้า/ลงนาม ผู้ใช้จะอัปโหลดผ่านหน้าเว็บเอง รองรับ production TDID CA G3 แบบ RSA เท่านั้น ไม่มี TSA/Trusted Timestamp, PAdES-LT/LTA, multi-signature, recovery หรือผล Acrobat/pyHanko acceptance รุ่นนี้ไม่เท่ากับการรับมอบ URS ทุกข้อ ดูขั้นตอนและขอบเขต [นำเข้า P12 ผ่านเว็บ](deploy-gcp.md#นำเข้า-p12-ผ่านหน้าเว็บและลงนาม)
 
@@ -30,18 +36,18 @@
 
 ## สถานะที่ตรวจได้ในโค้ด
 
-| กลุ่ม URS | มีแล้วในรุ่นพัฒนา                                                                                                  | งานที่ยังไม่ผ่านรับมอบ                                                                                  |
-| --------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| AUTH      | Google OIDC/allowlist implementation, HTTPS Cloud Run, session timeout/revoke, CSRF, WebAuthn registration/transaction approval | Google login จนจบ callback, Recovery Kit, device/session UI, failure auditing ครบ |
-| CERT | Browser P12 wrapped import, HSM key/certificate mapping, TDID G3/NRCA chain + CRL, public certificate metadata | ใบรับรองผู้ใช้จริง, CA รุ่นอื่น, credential lifecycle/retention |
-| EDIT      | PDF upload, Thai text/date/stamp/drawing, drag, Undo/Redo, autosave, real preview                                  | เครื่องมือขั้นสูง/template, fixture matrix ครบหลายขนาด/rotation/crop, performance รับมอบ                |
-| SIGN | HSM RSA-SHA256 CMS/CAdES, digest/key binding, WebAuthn, TTL, idempotency, uncertain import/sign reconciliation, OpenSSL validator | ใบรับรองผู้ใช้จริง, Acrobat/PAdES conformance matrix, TSA/LTV, recovery policy |
-| LOCK      | Signed revision อ่านอย่างเดียว, duplicate original                                                                 | DocMDP/FieldMDP, incremental co-sign, external import/lineage, compatibility matrix                     |
-| INTEG     | SHA-256 original/revision, ตรวจตอนอ่าน, OpenSSL CMS, แสดง Trust/Revocation/Time แยก                                | ตรวจ PDF ภายนอก, multi-signature, modification policy, trust/revocation/time validation                 |
-| QR        | Optional QR ก่อนเซ็น, opaque ID, minimal public evidence, browser hash comparison                                  | Lifecycle/disable policy, public quota/abuse test, external revision policy                             |
-| VAULT     | Owner isolation, revisions, search/filter/trash, PostgreSQL และ Cloud Storage adapters                             | Cloud acceptance, migration, KMS, restore drill, quota/retention/purge, pagination >200                 |
-| AUD       | Transactional outbox, idempotent ingest, SQL hash chain, scheduled cloud drain configuration                       | Checkpoint อิสระ, WORM/retention, failure event coverage, export และ restore proof                      |
-| SEC / OPS | Service identities, CSRF/origin, rate/PDF limits, lock, Compose/CI, Cloud Run deployment และ IAM smoke checks จริง | KMS, monitoring, recovery, rollback/restore drills, load acceptance, cost controls |
+| กลุ่ม URS | มีแล้วในรุ่นพัฒนา                                                                                                                 | งานที่ยังไม่ผ่านรับมอบ                                                                   |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| AUTH      | Google OIDC/allowlist implementation, HTTPS Cloud Run, session timeout/revoke, CSRF, WebAuthn registration/transaction approval   | Google login จนจบ callback, Recovery Kit, device/session UI, failure auditing ครบ        |
+| CERT      | Browser P12 wrapped import, HSM key/certificate mapping, TDID G3/NRCA chain + CRL, public certificate metadata                    | ใบรับรองผู้ใช้จริง, CA รุ่นอื่น, credential lifecycle/retention                          |
+| EDIT      | PDF upload, Thai text/date/stamp/drawing, drag, Undo/Redo, autosave, real preview                                                 | เครื่องมือขั้นสูง/template, fixture matrix ครบหลายขนาด/rotation/crop, performance รับมอบ |
+| SIGN      | HSM RSA-SHA256 CMS/CAdES, digest/key binding, WebAuthn, TTL, idempotency, uncertain import/sign reconciliation, OpenSSL validator | ใบรับรองผู้ใช้จริง, Acrobat/PAdES conformance matrix, TSA/LTV, recovery policy           |
+| LOCK      | Signed revision อ่านอย่างเดียว, duplicate original                                                                                | DocMDP/FieldMDP, incremental co-sign, external import/lineage, compatibility matrix      |
+| INTEG     | SHA-256 original/revision, ตรวจตอนอ่าน, OpenSSL CMS, แสดง Trust/Revocation/Time แยก                                               | ตรวจ PDF ภายนอก, multi-signature, modification policy, trust/revocation/time validation  |
+| QR        | Optional QR ก่อนเซ็น, opaque ID, minimal public evidence, browser hash comparison                                                 | Lifecycle/disable policy, public quota/abuse test, external revision policy              |
+| VAULT     | Owner isolation, revisions, search/filter/trash, PostgreSQL และ Cloud Storage adapters                                            | Cloud acceptance, migration, KMS, restore drill, quota/retention/purge, pagination >200  |
+| AUD       | Transactional outbox, idempotent ingest, SQL hash chain, scheduled cloud drain configuration                                      | Checkpoint อิสระ, WORM/retention, failure event coverage, export และ restore proof       |
+| SEC / OPS | Service identities, CSRF/origin, rate/PDF limits, lock, Compose/CI, Cloud Run deployment และ IAM smoke checks จริง                | KMS, monitoring, recovery, rollback/restore drills, load acceptance, cost controls       |
 
 ## หลักฐานทดสอบที่จัดไว้
 

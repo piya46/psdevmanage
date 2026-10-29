@@ -27,17 +27,17 @@ npm run deploy:gcp -- --environment production --env-file .env.production
 
 ค่าเริ่มต้น production ใช้ชื่อ `pston-prod` ห้ามใช้ชื่อทับ demo เดิม สคริปต์ตรวจ environment label ของ resources และปฏิเสธการสลับ environment บนข้อมูลชุดเดียวกัน ไม่ย้าย SQLite/PDF/บัญชี demo ขึ้น production
 
-| ส่วน          | Production profile                                                                             |
-| ------------- | ---------------------------------------------------------------------------------------------- |
-| Runtime       | NODE_ENV=production, Google OIDC + email allowlist, ไม่มี demo login/test signer               |
-| Browser       | HTTPS, Secure/HttpOnly/SameSite=Lax และ __Host- cookies, CSRF + exact origin                   |
-| Internal APIs | Identity/Documents/Signing/Audit ยังต้องผ่าน Cloud Run IAM และ application service JWT         |
-| Gateway       | เปิด roles/run.invoker ให้ allUsers เฉพาะ gateway หลัง smoke checks; API เอกสารต้อง login      |
-| Cloud SQL     | PostgreSQL 17 Enterprise, regional HA, 2 vCPU / 7.5 GiB, SSD 50 GiB ขยายได้ถึง 100 GiB         |
-| Backup        | Daily backup 30 ชุด, PITR/log retention 7 วัน, deletion protection; ยังต้อง restore drill      |
-| Secrets       | แยกสิทธิ์รายบริการ, pin numeric version, ไม่มี test cert/key ใน production                     |
-| Startup       | ปฏิเสธ HTTP origin, SQLite, ขาด credentials/bucket, demo signing หรือ URL ภายในที่ไม่ใช้ HTTPS |
-| Readiness     | /ready ตรวจการเรียกบริการและ query ฐานข้อมูลทั้ง 4 บริการ พร้อม release marker                 |
+| ส่วน          | Production profile                                                                                                    |
+| ------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Runtime       | NODE_ENV=production, Google OIDC + email allowlist, ไม่มี demo login/test signer                                      |
+| Browser       | HTTPS, Secure/HttpOnly/SameSite=Lax และ __Host- cookies, CSRF + exact origin                                          |
+| Internal APIs | Identity/Documents/Signing/Audit ยังต้องผ่าน Cloud Run IAM และ application service JWT                                |
+| Gateway       | เปิด roles/run.invoker ให้ allUsers เฉพาะ gateway หลัง smoke checks; API เอกสารต้อง login                             |
+| Cloud SQL     | PostgreSQL 17 Enterprise, regional HA, 2 vCPU / 7.5 GiB, SSD 50 GiB ขยายได้ถึง 100 GiB                                |
+| Backup        | Daily backup 30 ชุด, PITR/log retention 7 วัน, deletion protection; ยังต้อง restore drill                             |
+| Secrets       | แยกสิทธิ์รายบริการ, pin numeric version, ไม่มี test cert/key ใน production                                            |
+| Startup       | ปฏิเสธ HTTP origin, SQLite, ขาด credentials/bucket, demo signing หรือ URL ภายในที่ไม่ใช้ HTTPS                        |
+| Readiness     | /ready ตรวจการเรียกบริการและ query ฐานข้อมูลทั้ง 4 บริการ พร้อม release marker                                        |
 | Signing       | `google-cloud-hsm`: browser P12 import, HSM RSA-SHA256, Passkey, TDID G3/NRCA chain + CRL; `disabled` ปิดการลงนามจริง |
 
 **ค่าใช้จ่าย:** HA Cloud SQL มีค่าเครื่องหลักและ standby ต่อเนื่อง แม้ Cloud Run scale ลง 0; ยังมีค่า disk/backups และบริการอื่น ค่า HA นี้สูงกว่า demo และเป็น tradeoff กับเป้าหมาย low fixed cost ใน URS สคริปต์ไม่ได้ตั้ง budget alert/hard spending cap ให้ ต้องคำนวณราคาตาม region และตั้ง budget ที่ project ก่อนใช้งานจริง ดู [Cloud SQL HA](https://docs.cloud.google.com/sql/docs/postgres/high-availability) และ [Pricing Calculator](https://cloud.google.com/products/calculator)
@@ -237,6 +237,6 @@ gcloud run services logs read pston-dev-documents --region asia-southeast1 --pro
 
 มี unit tests สำหรับ PostgreSQL engine ผ่าน PGlite และ SQLite, transaction rollback/outbox/approval concurrency; storage adapter tests สำหรับ create-only PDF objects; mock Google Cloud orchestration สำหรับสร้างครั้งแรก/รันซ้ำและ IAM; API integration และ browser E2E ของ application เส้นทางลงนาม
 
-Deploy จริงใน `piyawebs` แล้ว: Cloud Run 5 บริการ, Cloud SQL HA, private buckets/secrets และ Scheduler พร้อม; ผ่าน database isolation, service readiness, IAM deny และ frontend/Google redirect smoke checks ดู [หลักฐานและข้อจำกัดล่าสุด](implementation-status.md) ยังไม่ได้ทดสอบ login จนจบด้วยบัญชีจริง, PDF upload/edit บน cloud, load/restore drill หรือ TDID signing การทดสอบ mock ตรวจลำดับและ configuration ของสคริปต์ ไม่ทดแทน cloud acceptance เต็มขอบเขต
+Deploy จริงใน `piyawebs` แล้ว: Cloud Run 5 บริการ, Cloud SQL HA, private buckets/secrets และ Scheduler พร้อม; ผ่าน database isolation, service readiness, IAM deny และ frontend/Google redirect smoke checks ทดสอบ HSM import/sign และ OpenSSL CAdES จริงด้วยกุญแจ fixture แล้ว ดู [หลักฐานและข้อจำกัดล่าสุด](implementation-status.md) ยังไม่ได้ทดสอบ login จนจบด้วยบัญชีจริง, PDF upload/edit บน cloud ด้วย session ผู้ใช้, load/restore drill หรือใบรับรอง TDID ของผู้ใช้ การทดสอบ mock ไม่ทดแทน cloud acceptance เต็มขอบเขต
 
 อ้างอิง: [Cloud SQL จาก Cloud Run](https://docs.cloud.google.com/sql/docs/postgres/connect-run), [Service-to-service authentication](https://docs.cloud.google.com/run/docs/authenticating/service-to-service), [Private service proxy](https://docs.cloud.google.com/run/docs/authenticating/developers), [Cloud Run limits](https://docs.cloud.google.com/run/quotas), [Cloud Storage preconditions](https://docs.cloud.google.com/storage/docs/request-preconditions)

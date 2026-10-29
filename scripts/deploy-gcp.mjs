@@ -1020,7 +1020,11 @@ export async function main({
     );
     if (production)
       console.log(
-        `\nProduction deployment checks passed. Browser: ${origin}\nGoogle login must still be accepted with your real account. TDID signing is disabled pending HSM integration and trust validation.\nCloud SQL HA continues to incur charges when idle.`,
+        `\nProduction deployment checks passed. Browser: ${origin}\n` +
+          (config.signingProvider === 'google-cloud-hsm'
+            ? 'Cloud HSM is enabled. Import your TDID P12/PFX in Certificates, register a Passkey, then approve a PDF for signing.\n'
+            : 'TDID signing is disabled. Set PSTON_SIGNING_PROVIDER=google-cloud-hsm and deploy to enable browser P12 import.\n') +
+          'Acceptance with your real Google account and TDID certificate is still required. Cloud SQL HA and HSM resources incur charges.',
       );
     else
       console.log(
