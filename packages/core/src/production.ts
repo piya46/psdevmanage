@@ -25,13 +25,22 @@ export function validateProduction(env: NodeJS.ProcessEnv, service?: ServiceName
   )
     throw new Error('Production requires Google login, PostgreSQL and Cloud Run IAM');
   if (
-    env.PSTON_SIGNING_PROVIDER !== 'disabled' ||
+    !['disabled', 'google-cloud-hsm'].includes(env.PSTON_SIGNING_PROVIDER ?? '') ||
     env.PSTON_DEMO_CERT_FILE ||
     env.PSTON_DEMO_KEY_FILE
   )
     throw new Error(
-      'Production signing must remain disabled until the TDID HSM adapter is accepted',
+      'Production requires disabled or google-cloud-hsm signing; demo and local private keys are forbidden',
     );
+  if (service === 'signing' && env.PSTON_SIGNING_PROVIDER === 'google-cloud-hsm') {
+    required('PSTON_KMS_KEY_RING');
+    if (
+      !/^projects\/[a-z][a-z0-9-]+\/locations\/[a-z0-9-]+\/keyRings\/[a-zA-Z0-9_-]+$/.test(
+        env.PSTON_KMS_KEY_RING!,
+      )
+    )
+      throw new Error('Invalid PSTON_KMS_KEY_RING');
+  }
   if (service === 'identity') {
     for (const key of ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']) required(key);
     if (!env.GOOGLE_CLIENT_ID!.endsWith('.apps.googleusercontent.com'))

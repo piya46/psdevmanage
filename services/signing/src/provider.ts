@@ -7,11 +7,37 @@ import { SignPdf } from '@signpdf/signpdf';
 import { Signer } from '@signpdf/utils';
 import { mode, serviceDir } from '../../../packages/core/src/config.js';
 import { ensure } from '../../../packages/core/src/errors.js';
+import { validateSigningTrust } from '../../../packages/core/src/certificate-trust.js';
+import { CloudHsm } from './kms.js';
+import { createDetachedCms } from './cms.js';
+import type { SigningCredential } from './credentials.js';
 
 export interface SigningProvider {
   readonly name: string;
   readonly testOnly: boolean;
   signPreparedPdf(input: Buffer, signingTime: Date): Promise<Buffer>;
+}
+export class HsmSigningProvider implements SigningProvider {
+  readonly name = 'tdid';
+  readonly testOnly = false;
+  constructor(
+    private kms: CloudHsm,
+    private credential: SigningCredential,
+  ) {}
+  async signPreparedPdf(input: Buffer, signingTime: Date) {
+    ensure(this.credential.enabled, 409, 'CERTIFICATE_DISABLED', 'ใบรับรองถูกระงับ');
+    const trusted = await validateSigningTrust(this.credential.pem);
+    const kms = this.kms,
+      credential = this.credential;
+    class HsmSigner extends Signer {
+      async sign(content: Buffer) {
+        return createDetachedCms(content, trusted.chain, signingTime, (attributes) =>
+          kms.sign(credential.keyVersion, attributes, trusted.cert, credential.algorithm),
+        );
+      }
+    }
+    return new SignPdf().sign(input, new HsmSigner(), signingTime);
+  }
 }
 /** Local test key only. Production TDID credentials are never accepted here. */
 export class DemoSigningProvider implements SigningProvider {

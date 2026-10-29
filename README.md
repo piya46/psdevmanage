@@ -2,7 +2,7 @@
 
 ระบบจัดการและลงนาม PDF ตาม URS v1.1 พัฒนาด้วย **Node.js + TypeScript + React** แยกเป็น Microservices สำหรับผู้พัฒนาคนเดียว
 
-รุ่นนี้มีเส้นทาง PDF ที่ลงนามด้วยกุญแจทดสอบ และ production deployment profile สำหรับ Google Login/พื้นที่เอกสารบน Cloud Run ยังไม่ผ่าน production acceptance และยังไม่ครบ MUST ใน URS การลงนาม TDID จริงยังปิดไว้ระหว่างพัฒนา HSM provider และ trust validation
+ระบบ Node.js/React แยก 5 บริการ รองรับ Google Login, PDF editor, browser P12 import และลงนาม TDID CA G3 ผ่าน Google Cloud HSM โดยอนุมัติด้วย Passkey ยังไม่ครบ MUST ใน URS และยังไม่มี Trusted Timestamp/LTV; ผลทดสอบและขอบเขตอยู่ใน [สถานะการพัฒนา](docs/implementation-status.md)
 
 ## Deploy Google Cloud ด้วยคำสั่งเดียว
 
@@ -12,7 +12,7 @@
 npm run deploy:gcp -- --environment production --env-file .env.production
 ```
 
-มี Cloud SQL HA + backups/PITR และเปิดเฉพาะ Gateway ให้เข้าหน้า Google Login ต้องเตรียม DNS/TLS/OAuth redirect ให้ตรงก่อน deploy อ่าน [ขั้นตอน production และตรวจ P12](docs/deploy-gcp.md) ค่าใช้จ่าย Cloud SQL HA ต่อเนื่องแม้ไม่มีผู้ใช้; การลงนาม TDID ยังไม่เปิด
+มี Cloud SQL HA + backups/PITR และเปิดเฉพาะ Gateway ให้เข้าหน้า Google Login ใช้ Cloud Run URL ก่อน map โดเมนได้ โดยตั้ง OAuth redirect ให้ตรง อ่าน [ขั้นตอน production และนำเข้า P12](docs/deploy-gcp.md) ตั้ง `PSTON_SIGNING_PROVIDER=google-cloud-hsm` เพื่อเปิดการนำเข้าใบรับรองสำหรับลงนาม มีค่าใช้จ่าย Cloud SQL HA ต่อเนื่อง และค่า HSM key versions/operations
 
 สำหรับ demo:
 
@@ -75,7 +75,7 @@ npm run build
 WEB_ORIGIN=http://localhost:3000 npm start
 ```
 
-เปิด http://localhost:3000 ใช้ข้อมูล `.local` เดิม และหยุด dev server ก่อนเพื่อไม่ให้พอร์ตชนกัน คำว่า build ไม่ได้หมายความว่ารุ่นนี้ผ่าน Production acceptance: Runtime production จะยอมเริ่มเฉพาะเมื่อผ่านเงื่อนไข Google Login/HTTPS/Cloud SQL/Secrets และปิด TDID signing
+เปิด http://localhost:3000 ใช้ข้อมูล `.local` เดิม และหยุด dev server ก่อนเพื่อไม่ให้พอร์ตชนกัน คำว่า build ไม่ได้หมายความว่ารุ่นนี้ผ่าน Production acceptance: Runtime production จะยอมเริ่มเฉพาะเมื่อผ่านเงื่อนไข Google Login/HTTPS/Cloud SQL/Secrets และใช้ HSM สำหรับการลงนามจริง
 
 ## Docker Compose สำหรับเครื่องพัฒนา
 
@@ -113,6 +113,6 @@ CI ใน `.github/workflows/ci.yml` ตรวจโค้ด ทดสอบ �
 
 คัดลอก `.env.example` เป็น `.env` แล้วตั้ง `PSTON_MODE=google`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_ALLOWED_EMAILS`, `GOOGLE_REDIRECT_URI` และ `WEB_ORIGIN` ให้ตรงกัน Allowlist ใช้อีเมล Gmail/Google Workspace ที่ Google ยืนยันแล้ว เช่น `GOOGLE_ALLOWED_EMAILS=yourname@gmail.com` ระบบยังใช้ Google `sub` เป็นรหัสเจ้าของเอกสารภายใน โค้ด OIDC มี state, nonce และ PKCE แต่ยังไม่ได้ทดสอบกับบัญชี Google จริงในงานนี้ เมื่อใช้ Google mode จะไม่มี demo signing certificate
 
-**ยังไม่รับไฟล์ P12/PFX หรือ Private Key จริง** ต้องยืนยันผลิตภัณฑ์ TDID, สิทธิ์นำเข้ากุญแจ, algorithm, chain และวิธีเรียก Cloud HSM/Remote Signing ก่อนทำ adapter ไม่มีการเดา endpoint หรือเก็บกุญแจ CA จริงไว้ในเครื่อง
+**นำเข้า P12/PFX ผ่านหน้าเว็บได้เมื่อเปิด Cloud HSM** เลือกไฟล์และกรอกรหัสผ่านในเบราว์เซอร์ ระบบส่งเฉพาะใบรับรองสาธารณะและกุญแจที่ wrap แล้วเข้า HSM ไม่รับ raw private key/P12/password ใน API หรือ env รองรับ TDID CA G3 แบบ RSA 2048/3072/4096 พร้อมตรวจ chain/CRL และผูกกุญแจกับบัญชีที่ login ต้องลงทะเบียน Passkey ก่อนอนุมัติลงนาม
 
-งานที่เหลือก่อน Production รวมถึง TDID adapter, Cloud KMS, cloud acceptance และ migration ข้อมูลเดิม, Independent PDF validation/Trust/OCSP/CRL/TSA policy, external incremental co-sign, Recovery, backup/restore, quota/retention, IAM และ deployment acceptance รายละเอียดอยู่ในแผนสถานะ
+งานรับมอบที่เหลือรวมการทดสอบใบรับรอง TDID ของผู้ใช้และ Acrobat/validator เป้าหมายจริง, TSA/LTV, external incremental co-sign, Recovery, backup/restore, migration, quota/retention, load/monitoring และ cloud acceptance เต็มขอบเขต รายละเอียดอยู่ในแผนสถานะ

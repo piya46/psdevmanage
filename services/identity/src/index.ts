@@ -427,6 +427,8 @@ function approvalClaims(manifest: Record<string, unknown>) {
     preparedHash: manifest.preparedHash,
     documentDigest: manifest.documentDigest,
     certificateId: manifest.certificateId,
+    keyVersion: manifest.keyVersion,
+    certificateFingerprint: manifest.certificateFingerprint,
     nonce: manifest.nonce,
   };
 }

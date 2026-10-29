@@ -10,6 +10,7 @@ await build({
       ]),
     ),
     'services/documents/pdf-worker': 'services/documents/src/pdf-worker.ts',
+    'scripts/check-cloud-hsm': 'scripts/check-cloud-hsm.ts',
   },
   outdir: 'dist',
   bundle: true,

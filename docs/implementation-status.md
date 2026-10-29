@@ -2,22 +2,46 @@
 
 อ้างอิง PSTON URS Thai v1.1 และการตัดสินใจของผู้ใช้: พัฒนาคนเดียว, TDID, Node.js + React, Microservices
 
-เอกสาร URS มี 186 Functional Requirements (164 MUST / 22 SHOULD), 23 NFR, 38 Acceptance Tests และ 18 Business Rules รุ่นนี้มีเส้นทางเอกสารในเครื่องและสคริปต์ Cloud Run พร้อม data adapters ที่ทดสอบในเครื่อง ไม่ใช่การผ่านรับมอบ URS ทั้งฉบับ
+เอกสาร URS มี 186 Functional Requirements (164 MUST / 22 SHOULD), 23 NFR, 38 Acceptance Tests และ 18 Business Rules รุ่นนี้มีเส้นทางเอกสารในเครื่องและ deploy production profile บน Cloud Run แล้ว แต่ยังไม่ผ่านรับมอบ URS ทั้งฉบับ
+
+## การนำเข้าใบรับรองและลงนาม HSM — 30 ตุลาคม 2026
+
+เพิ่มหน้า P12/PFX import ตามคำขอผู้ใช้: อ่านและ wrap กุญแจใน browser worker, ส่งเฉพาะ public certificate และ wrapped key ไป Cloud HSM, ผูก owner/fingerprint/key version และอนุมัติ PDF ด้วย Passkey ก่อนลงนามจริง ตรวจ TDID G3/NRCA G1 chain, KeyUsage/EKU, validity และ signed CRLs; หากตรวจไม่ได้จะหยุด ไม่มี raw private key/password ใน API, DB หรือ app env
+
+ผ่าน `npm run check`: TypeScript, ESLint, unit/integration 54 tests และ build; ผ่าน Chrome E2E ของ build จริง 4 cases รวมรหัส P12 ผิดต้องไม่ส่ง request, browser wrapping ที่ unwrap/เทียบ public key ได้, Passkey approval และ signed download ทดสอบ KMS transport ด้วย fixture และตรวจ detached CMS/CAdES แบบอิสระด้วย OpenSSL แล้ว ผล Cloud HSM จริงและ deployment รอบนี้กำลังตรวจ จึงยังไม่ถือว่าผ่านจาก tests จำลองเพียงอย่างเดียว
+
+ใบรับรอง TDID ของผู้ใช้ยังไม่ได้ถูกนำเข้า/ลงนาม ผู้ใช้จะอัปโหลดผ่านหน้าเว็บเอง รองรับ production TDID CA G3 แบบ RSA เท่านั้น ไม่มี TSA/Trusted Timestamp, PAdES-LT/LTA, multi-signature, recovery หรือผล Acrobat/pyHanko acceptance รุ่นนี้ไม่เท่ากับการรับมอบ URS ทุกข้อ ดูขั้นตอนและขอบเขต [นำเข้า P12 ผ่านเว็บ](deploy-gcp.md#นำเข้า-p12-ผ่านหน้าเว็บและลงนาม)
+
+## ผล deploy ก่อนเพิ่ม HSM — 29 ตุลาคม 2026
+
+เปิดใช้งานที่ https://pston-prod-gateway-874466691788.asia-southeast1.run.app ใน project `piyawebs`, region `asia-southeast1`, deployment `pston-prod` โดยใช้ Billing MA-001 และเลื่อนการ map โดเมนตามคำขอผู้ใช้ `.env.production` ใช้ Cloud Run URL เป็น WEB_ORIGIN แล้ว
+
+- Cloud Run ทั้ง 5 บริการพร้อมและใช้ release เดียวกัน `20261027183251239-204645`; Gateway เปิดหน้าเว็บได้ และ Identity/Documents/Signing/Audit ยังตอบ 403 หากเรียกโดยไม่มี Google IAM
+- Cloud SQL PostgreSQL 17 เป็น RUNNABLE, regional HA, backups 30 ชุด, PITR 7 วัน และ deletion protection; init job สำเร็จพร้อมตรวจ CONNECT ของ role/database ทั้ง 16 คู่ว่าเข้าได้เฉพาะฐานของตน แล้วลบ bootstrap job
+- สร้าง private Storage buckets, Secret Manager และ Scheduler 3 jobs แล้ว; `/ready` ผ่านการเรียกบริการและอ่านฐานข้อมูลทั้ง 4, `/api/documents` ตอบ 401 เมื่อไม่ login, demo login ตอบ 404
+- Chrome เปิด React ได้ ไม่มี JavaScript error และไปถึงหน้าลงชื่อเข้าใช้ของ Google โดยไม่พบ redirect_uri_mismatch; ตรวจ Secure/HttpOnly OAuth cookie แล้ว **ยังไม่ได้กรอกบัญชี Google จนจบ callback/token exchange** หรือทดสอบ upload/edit ด้วย session จริงบน cloud
+- TDID signing ยังปิดอยู่ และยังไม่ได้ทำ load/restore drill, monitoring/budget alerts หรือ custom domain
+
+แก้ปัญหาจาก deploy จริง: Python 3.9 ทำให้ gcloud Storage พิมพ์ข้อความปน JSON (เครื่องนี้ใช้ Python 3.13 แล้ว), รองรับข้อความ `Cannot find job/service` เมื่อสร้างครั้งแรก, ให้ administrator มี SET/INHERIT membership ก่อน CREATE DATABASE OWNER บน PostgreSQL 17 และเพิ่ม retry แบบจำกัดสำหรับ startup/readiness probes โดยไม่ retry การสร้างทรัพยากรหรือ login actions
+
+ผลตรวจสคริปต์ล่าสุด: deployment unit/integration tests 17 กรณีและ ESLint ของไฟล์ที่แก้ผ่าน รวม retry หลัง IAM/network/startup failure, การหยุดเมื่อครบจำนวนครั้ง, การปฏิเสธ HTTP/JSON ที่ไม่ถูกต้อง และการไม่พิมพ์ response ที่อาจมีข้อมูลลับ ไม่ได้รันชุด browser demo E2E เดิมซ้ำในรอบแก้ deployment นี้
+
+หลักฐาน local อยู่ใน `.local/gcp-deploy/piyawebs/asia-southeast1/pston-prod/`: `last-deployment.json`, `verification.json`, `browser-verification.json` และ `frontend.png` ไฟล์เหล่านี้ไม่ถูกอัปโหลดเข้า build หรือเก็บใน source control
 
 ## สถานะที่ตรวจได้ในโค้ด
 
 | กลุ่ม URS | มีแล้วในรุ่นพัฒนา                                                                                                  | งานที่ยังไม่ผ่านรับมอบ                                                                                  |
 | --------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| AUTH      | Google OIDC/allowlist implementation, session timeout/revoke, CSRF, WebAuthn registration/transaction approval     | ทดสอบ Google จริง, Recovery Kit, device/session UI, failure auditing ครบ, production HTTPS              |
-| CERT      | Public certificate metadata, expiry checks ของ test signer, ปิด sign เมื่อไม่มี provider                           | TDID P12/PFX policy, wrapped import, HSM/remote adapter, chain/revocation                               |
+| AUTH      | Google OIDC/allowlist implementation, HTTPS Cloud Run, session timeout/revoke, CSRF, WebAuthn registration/transaction approval | Google login จนจบ callback, Recovery Kit, device/session UI, failure auditing ครบ |
+| CERT | Browser P12 wrapped import, HSM key/certificate mapping, TDID G3/NRCA chain + CRL, public certificate metadata | ใบรับรองผู้ใช้จริง, CA รุ่นอื่น, credential lifecycle/retention |
 | EDIT      | PDF upload, Thai text/date/stamp/drawing, drag, Undo/Redo, autosave, real preview                                  | เครื่องมือขั้นสูง/template, fixture matrix ครบหลายขนาด/rotation/crop, performance รับมอบ                |
-| SIGN      | CMS test signing, hash/digest binding, WebAuthn, TTL, idempotency, service auth, recovery จากผลที่เก็บไว้          | TDID/HSM จริง, independent validator, algorithm/chain/PAdES conformance, production MFA/recovery policy |
+| SIGN | HSM RSA-SHA256 CMS/CAdES, digest/key binding, WebAuthn, TTL, idempotency, uncertain import/sign reconciliation, OpenSSL validator | ใบรับรองผู้ใช้จริง, Acrobat/PAdES conformance matrix, TSA/LTV, recovery policy |
 | LOCK      | Signed revision อ่านอย่างเดียว, duplicate original                                                                 | DocMDP/FieldMDP, incremental co-sign, external import/lineage, compatibility matrix                     |
 | INTEG     | SHA-256 original/revision, ตรวจตอนอ่าน, OpenSSL CMS, แสดง Trust/Revocation/Time แยก                                | ตรวจ PDF ภายนอก, multi-signature, modification policy, trust/revocation/time validation                 |
 | QR        | Optional QR ก่อนเซ็น, opaque ID, minimal public evidence, browser hash comparison                                  | Lifecycle/disable policy, public quota/abuse test, external revision policy                             |
 | VAULT     | Owner isolation, revisions, search/filter/trash, PostgreSQL และ Cloud Storage adapters                             | Cloud acceptance, migration, KMS, restore drill, quota/retention/purge, pagination >200                 |
 | AUD       | Transactional outbox, idempotent ingest, SQL hash chain, scheduled cloud drain configuration                       | Checkpoint อิสระ, WORM/retention, failure event coverage, export และ restore proof                      |
-| SEC / OPS | Service identities, CSRF/origin, rate/PDF limits, lock, Compose/CI, one-command Cloud Run/IAM/Secret configuration | Effective IAM/cloud deployment proof, KMS, monitoring, recovery, rollback/restore drills, cost controls |
+| SEC / OPS | Service identities, CSRF/origin, rate/PDF limits, lock, Compose/CI, Cloud Run deployment และ IAM smoke checks จริง | KMS, monitoring, recovery, rollback/restore drills, load acceptance, cost controls |
 
 ## หลักฐานทดสอบที่จัดไว้
 
@@ -27,7 +51,7 @@
 - Browser E2E: Thai PDF editor → actual preview → virtual WebAuthn user verification → signed download → public evidence; replay challenge ถูกปฏิเสธ และตรวจ viewport มือถือ
 - Build, lint, TypeScript และ dependency audit; มี CI definition พร้อมรันเมื่อเก็บ repo ใน GitHub
 
-Browser ใช้ virtual authenticator ใน Chrome จึงยังไม่แทนการทดสอบอุปกรณ์จริงทุกชนิด Google OIDC/TDID/Cloud APIs ยังไม่ได้ทดสอบกับ credential จริงหรือ deploy project จริงในรอบนี้ ไม่มีผล Acrobat/pyHanko compatibility หรือ production load/restore test ในรอบนี้ Docker Compose ตรวจ config ได้ แต่ยังไม่ได้รัน containers เพราะ daemon ไม่เปิด
+Browser E2E ของ demo ใช้ virtual authenticator ใน Chrome จึงยังไม่แทนการทดสอบอุปกรณ์จริงทุกชนิด ผล cloud deployment และ browser smoke ของ production อยู่ในหัวข้อล่าสุดด้านบน ยังไม่มีผล Google login จนจบ callback, TDID signing, Acrobat/pyHanko compatibility หรือ production load/restore test; Docker Compose ตรวจ config ได้ แต่ยังไม่ได้รัน containers บนเครื่อง ส่วน image จริง build และรันบน Cloud Run แล้ว
 
 ## ลำดับงานสำหรับผู้พัฒนาคนเดียว
 
@@ -47,9 +71,9 @@ Browser ใช้ virtual authenticator ใน Chrome จึงยังไม�
 
 รัน npm run deploy:gcp -- --project YOUR_PROJECT_ID เพื่อสร้าง Cloud Run 5 บริการ, Cloud SQL PostgreSQL, Cloud Storage และ Secret Manager โดย build บน Cloud Build และเปิดเว็บผ่าน Google IAM proxy ไม่ต้องมี Docker daemon ในเครื่อง [คู่มือ deploy](deploy-gcp.md) ระบุ prerequisites, ค่าใช้จ่ายต่อเนื่องของ Cloud SQL, การอัปเดต/หยุด และข้อจำกัดไว้ครบ
 
-Cloud deploy แยกจากข้อมูล SQLite/PDF เดิม ไม่อัปโหลดข้อมูลใน .local หรือ .env และยังใช้ certificate ทดสอบ ขนาด PDF cloud จำกัด 20 MiB; TDID production signing ยังไม่พร้อม ส่วน production profile แยกเปิด Gateway ผ่าน HTTPS + Google allowlist โดยไม่เปิด demo signing
+Cloud deploy แยกจากข้อมูล SQLite/PDF เดิม ไม่อัปโหลดข้อมูลใน .local หรือ .env และยังใช้ certificate ทดสอบ ขนาด PDF cloud จำกัด 20 MiB; production profile แยกเปิด Gateway ผ่าน HTTPS + Google allowlist โดยไม่เปิด demo signing และเลือก Cloud HSM ได้ตามหัวข้อล่าสุด
 
-## Production profile และข้อมูล TDID ล่าสุด
+## ประวัติการเพิ่ม production profile ก่อน HSM
 
 ผู้ใช้แจ้งว่ามี Project, โดเมน HTTPS, Google OAuth, CER/CRT และสร้าง P12 แล้ว ภาพอีเมลแสดงขั้นตอนรวม cert.cer กับ cert.key เป็น P12; ยังไม่ได้เปิดไฟล์หรือยืนยัน private key/chain/policy/revocation จริง ไม่มีการส่งหรืออัปโหลด private key ในงานรอบนี้
 
@@ -57,14 +81,14 @@ Cloud deploy แยกจากข้อมูล SQLite/PDF เดิม ไม
 
 Runtime ตรวจ production configuration ก่อน startup, ใช้ __Host- cookies, Google verified email/azp/required claims, ตรวจ allowlist ซ้ำเมื่ออ่าน session และปิด demo endpoint/test keys แก้ rate-limit plugin ให้ลงทะเบียนก่อน routes และมี database readiness; ยังไม่ได้เพิ่ม Cloud Armor/distributed limits, monitoring alerts หรือ automatic rollback
 
-เพิ่ม `npm run cert:check -- --file /path/certificate.p12 --certificate /path/cert.cer` ให้ OpenSSL ถามรหัสผ่านใน Terminal และตรวจ key/cert/validity ใน memory ไม่อัปโหลดกุญแจหรือบันทึกรหัสผ่าน ผลมีเฉพาะข้อมูลสาธารณะ ไม่ใช่ chain/revocation/TDID policy validation และยังไม่มี wrapped importer/HSM signer
+เพิ่ม `npm run cert:check -- --file /path/certificate.p12 --certificate /path/cert.cer` ให้ OpenSSL ถามรหัสผ่านใน Terminal และตรวจ key/cert/validity ใน memory ไม่อัปโหลดกุญแจหรือบันทึกรหัสผ่าน ผลมีเฉพาะข้อมูลสาธารณะ ไม่ใช่ chain/revocation/TDID policy validation ส่วน browser wrapped importer/HSM signer เพิ่มภายหลังตามหัวข้อล่าสุด
 
-Tests เพิ่มสำหรับ runtime rejection, rate-limit regression, encrypted P12 จริงด้วย fixture, config/secret exclusion และ mock production deploy/redeploy/rotation/HA drift ไม่มีผล deploy จริงหรือการลงนาม TDID จริง การมี production profile จึงไม่หมายถึงผ่าน production acceptance ตาม URS
+Tests เพิ่มสำหรับ runtime rejection, rate-limit regression, encrypted P12 จริงด้วย fixture, config/secret exclusion และ mock production deploy/redeploy/rotation/HA drift ผล deploy จริงอยู่ด้านบน ส่วนการลงนาม TDID และ production acceptance ตาม URS ยังไม่ผ่านรับมอบ
 
-ผลตรวจรอบนี้: TypeScript/lint/build ผ่าน, unit/integration tests รวม 35 cases ผ่าน (รวม Google claim/session policy เพิ่มเติม), browser E2E ของ demo ที่ build แล้ว 3 cases ผ่าน และ Docker Compose config ผ่าน การตรวจเหล่านี้ไม่ได้ใช้ Google/TDID credentials จริงและยังไม่ได้ build/run Docker container หรือ deploy Google Cloud จริง
+ผลตรวจช่วงเพิ่ม production profile ก่อน cloud deployment: TypeScript/lint/build ผ่าน, unit/integration tests รวม 35 cases ผ่าน (รวม Google claim/session policy เพิ่มเติม), browser E2E ของ demo ที่ build แล้ว 3 cases ผ่าน และ Docker Compose config ผ่าน การตรวจชุดนี้ไม่ได้ใช้ Google/TDID credentials จริง
 
 ## Email allowlist
 
 ปรับตามคำขอให้ตั้ง GOOGLE_ALLOWED_EMAILS ด้วยอีเมลเริ่มต้นได้ ไม่ต้องหา sub รองรับหลายอีเมลแบบ exact match หลัง normalize case/whitespace; ตรวจ Google verified email และ Gmail/Workspace authority, ยังคง sub เป็น owner ID และตรวจ allowlist ซ้ำเมื่ออ่าน session เพิ่ม validator ร่วมสำหรับ runtime/deploy, ปรับตัวอย่าง env และส่งค่าเฉพาะ Identity ใน Cloud Run ค่า email มีผลเหนือ legacy sub list รวมถึงการตั้ง email ว่างจะไม่ fallback ไปเปิดสิทธิ์เดิม การเปลี่ยนจาก sub-only ต้อง login ใหม่เพื่อยืนยันอีเมล
 
-ผลตรวจ email allowlist: npm run check ผ่านทั้ง TypeScript, lint, unit/integration 38 cases และ build; ทดสอบการ normalize อีเมล, ปฏิเสธ unverified/บัญชีอื่น/aliases/third-party mailbox, ถอนสิทธิ์ session, legacy compatibility และส่ง email configuration เฉพาะ Identity ใน mock deployment แล้ว ยังไม่ได้ทดสอบ Google Login หรือ deploy บน cloud จริงในรอบนี้
+ผลตรวจ email allowlist ก่อน cloud deployment: npm run check ผ่านทั้ง TypeScript, lint, unit/integration 38 cases และ build; ทดสอบการ normalize อีเมล, ปฏิเสธ unverified/บัญชีอื่น/aliases/third-party mailbox, ถอนสิทธิ์ session, legacy compatibility และส่ง email configuration เฉพาะ Identity ใน mock deployment แล้ว ผลนี้ยังไม่ใช่การทดสอบบัญชี Google จริงจนจบ login

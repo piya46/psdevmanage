@@ -69,6 +69,8 @@ export function Editor({
   const [confirmed, setConfirmed] = useState(false);
   const [certificateId, setCertificateId] = useState(certificates.find((c) => c.canSign)?.id ?? '');
   const [passkey, setPasskey] = useState(session.passkeys > 0);
+  const testSigning =
+    certificates.find((cert) => cert.id === certificateId)?.testOnly ?? session.mode === 'demo';
   const [draw, setDraw] = useState(false);
   const [revision, setRevision] = useState(initial.revisions.at(-1)!.id);
   const [pendingRequest, setPendingRequest] = useState<string | null>(null);
@@ -187,7 +189,7 @@ export function Editor({
     setPreview(null);
     setSelected(null);
     onChanged();
-    toast('ลงนามทดสอบและตรวจสอบลายเซ็นสำเร็จ');
+    toast(testSigning ? 'ลงนามทดสอบและตรวจสอบลายเซ็นสำเร็จ' : 'ลงนามและตรวจสอบลายเซ็นสำเร็จ');
   }
   async function sign() {
     if (!preview || !confirmed) return;
@@ -199,7 +201,7 @@ export function Editor({
       });
       setPendingRequest(request.id);
       let approval: { approvalToken: string };
-      if (passkey) {
+      if (passkey || !testSigning) {
         const options = await api<PublicKeyCredentialRequestOptionsJSON>('/approval/options', {
           method: 'POST',
           body: { manifestToken: request.manifestToken },
@@ -707,13 +709,20 @@ export function Editor({
                   </select>
                 </label>
                 <div className="notice warning">
-                  ใบรับรองทดสอบ Self-signed ไม่ใช่ TDID และไม่มี Trusted Timestamp
+                  {testSigning
+                    ? 'ใบรับรองทดสอบ Self-signed ไม่ใช่ TDID และไม่มี Trusted Timestamp'
+                    : 'ลงนามด้วยใบรับรอง TDID · ฉบับนี้ยังไม่มี Trusted Timestamp สำหรับการตรวจย้อนหลังระยะยาว'}
                 </div>
+                {!testSigning && session.passkeys === 0 && (
+                  <div className="notice warning">
+                    กรุณาลงทะเบียน Passkey ในศูนย์ความปลอดภัยก่อนลงนาม
+                  </div>
+                )}
                 <div className="hash-card">
                   <small>SHA-256 · PDF ก่อนลงนาม</small>
                   <code>{preview.hash}</code>
                 </div>
-                {session.passkeys > 0 && (
+                {testSigning && session.passkeys > 0 && (
                   <label className="check-row">
                     <input
                       type="checkbox"
@@ -730,15 +739,20 @@ export function Editor({
                     checked={confirmed}
                     onChange={(e) => setConfirmed(e.target.checked)}
                   />
-                  <span>ตรวจเอกสารฉบับนี้แล้ว และยืนยันการลงนามทดสอบ</span>
+                  <span>ตรวจเอกสารฉบับนี้แล้ว และยืนยันการลงนาม{testSigning ? 'ทดสอบ' : ''}</span>
                 </label>
                 <button
                   className="button primary full"
-                  disabled={!confirmed || signing || !certificateId}
+                  disabled={
+                    !confirmed ||
+                    signing ||
+                    !certificateId ||
+                    (!testSigning && session.passkeys === 0)
+                  }
                   onClick={() => void sign()}
                 >
                   {signing ? <LoaderCircle className="spin" size={17} /> : <PenLine size={17} />}
-                  ลงนามทดสอบ
+                  {testSigning ? 'ลงนามทดสอบ' : 'ยืนยันด้วย Passkey และลงนาม'}
                 </button>
                 {pendingRequest && !signing && (
                   <button className="button secondary full mt" onClick={() => void reconcile()}>

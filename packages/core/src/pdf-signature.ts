@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { sha256 } from './security.js';
 import { ensure } from './errors.js';
+import { validateSigningTrust, tdidTrustBundle } from './certificate-trust.js';
 
 export function preparedDigest(input: Buffer) {
   let pdf = removeTrailingNewLine(input);
@@ -109,17 +110,33 @@ export async function verifyPdf(pdf: Buffer) {
       { timeout: 15000, maxBuffer: 1024 * 1024 },
     );
     const certificate = new X509Certificate(await readFile(join(dir, 'signer.pem')));
+    let trust: 'trusted' | 'untrusted' | 'unknown' = 'untrusted';
+    let revocation: 'good' | 'not_checked' | 'unknown' = 'not_checked';
+    let trustCheckedAt: string | undefined;
+    const bundle = await tdidTrustBundle();
+    if (certificate.checkIssued(new X509Certificate(bundle.issuer.pem))) {
+      try {
+        const checked = await validateSigningTrust(certificate.toString(), { bundle });
+        trust = checked.trust;
+        revocation = checked.revocation;
+        trustCheckedAt = checked.checkedAt;
+      } catch {
+        trust = 'unknown';
+        revocation = 'unknown';
+      }
+    }
     return {
       crypto: 'valid' as const,
-      trust: 'untrusted' as const,
-      revocation: 'not_checked' as const,
+      trust,
+      revocation,
+      trustCheckedAt,
       timestamp: 'none' as const,
       modification: 'whole_revision_covered' as const,
       sha256: sha256(pdf),
       documentDigest: extracted.digest,
       certificateFingerprint: sha256(certificate.raw),
       byteRange: extracted.range,
-      validator: 'OpenSSL CMS (cryptographic verification; no trust validation)',
+      validator: 'OpenSSL CMS; TDID G3 / NRCA G1 chain and CRL validation when applicable',
     };
   } finally {
     await rm(dir, { recursive: true, force: true });

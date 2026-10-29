@@ -82,6 +82,9 @@ export interface SigningRequest {
   error?: string;
   approvalEvidenceHash?: string;
   attemptId?: string;
+  testOnly?: boolean;
+  keyVersion?: string;
+  certificateFingerprint?: string;
 }
 export interface AuditEvent {
   id: string;

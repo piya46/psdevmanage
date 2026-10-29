@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
@@ -19,7 +19,69 @@ import {
   invocationGraph,
   deploymentEnv,
   assertGatewayPolicy,
+  fetchDeploymentJSON,
 } from '../../scripts/lib/gcp-deploy.mjs';
+
+describe('deployment startup probes', () => {
+  const url = 'https://gateway.example.test/ready';
+  it('waits for IAM propagation and backend startup while preserving authenticated requests', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('IAM propagation', { status: 403 }))
+      .mockResolvedValueOnce(new Response('Backend starting', { status: 503 }))
+      .mockResolvedValueOnce(Response.json({ status: 'ok', release: 'expected-release' }));
+    const wait = vi.fn().mockResolvedValue(undefined);
+    const headers = { authorization: 'Bearer test-token' };
+    await expect(fetchDeploymentJSON(url, { fetch, wait, headers })).resolves.toEqual({
+      status: 'ok',
+      release: 'expected-release',
+    });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(wait).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenLastCalledWith(
+      url,
+      expect.objectContaining({ headers, redirect: 'error' }),
+    );
+  });
+  it('recovers from a temporary network failure', async () => {
+    const fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(Response.json({ status: 'ok' }));
+    const wait = vi.fn().mockResolvedValue(undefined);
+    await expect(fetchDeploymentJSON(url, { fetch, wait })).resolves.toEqual({ status: 'ok' });
+    expect(wait).toHaveBeenCalledTimes(1);
+  });
+  it.each([401, 404])('stops on permanent HTTP %i without retrying', async (status) => {
+    const fetch = vi.fn().mockResolvedValue(new Response('sensitive body', { status }));
+    const wait = vi.fn();
+    await expect(fetchDeploymentJSON(url, { fetch, wait })).rejects.toThrow(`HTTP ${status}`);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
+  });
+  it('stops after the retry limit and omits upstream response contents', async () => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () => new Response('sensitive body', { status: 503 }));
+    const wait = vi.fn().mockResolvedValue(undefined);
+    const error = await fetchDeploymentJSON(url, { fetch, wait, attempts: 3 }).catch(
+      (error) => error,
+    );
+    expect(error.message).toContain('did not become ready (HTTP 503)');
+    expect(error.message).not.toContain('sensitive body');
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(wait).toHaveBeenCalledTimes(2);
+  });
+  it('rejects malformed successful responses without retrying or exposing the body', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response('sensitive body'));
+    const wait = vi.fn();
+    await expect(fetchDeploymentJSON(url, { fetch, wait })).rejects.toThrow(
+      'returned invalid JSON',
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
+  });
+});
 
 describe('Cloud Run deployment boundaries', () => {
   it('requires a private allowlisted production env file and never puts secrets in a dry run', () => {

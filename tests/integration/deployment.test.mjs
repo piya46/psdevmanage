@@ -34,11 +34,14 @@ function fixture(production = false) {
     publicProject: false,
     failBuild: false,
     billing: { billingEnabled: true },
+    keyRing: null,
+    hsmRole: null,
+    projectPolicy: { etag: 'fixture-etag', bindings: [], auditConfigs: [] },
   };
   const value = (args, key) =>
     args.find((a) => a.startsWith(key + '='))?.slice(key.length + 1) ?? args[args.indexOf(key) + 1];
-  const missing = () => {
-    throw Object.assign(new Error('not found'), { detail: 'NOT_FOUND' });
+  const missing = (detail = 'NOT_FOUND') => {
+    throw Object.assign(new Error('not found'), { detail });
   };
   const run = (command, args, options = {}) => {
     if (command === 'openssl')
@@ -72,6 +75,19 @@ function fixture(production = false) {
     if (is('iam service-accounts create')) {
       state.accounts[args[3] + '@example-project.iam.gserviceaccount.com'] = {
         description: value(args, '--description'),
+      };
+      return '';
+    }
+    if (is('kms keyrings describe')) return result(state.keyRing ?? missing());
+    if (is('kms keyrings create')) {
+      state.keyRing = { name: args[3] };
+      return '';
+    }
+    if (is('iam roles describe')) return result(state.hsmRole ?? missing());
+    if (is('iam roles create') || is('iam roles update')) {
+      state.hsmRole = {
+        description: value(args, '--description'),
+        permissions: value(args, '--permissions').split(','),
       };
       return '';
     }
@@ -122,7 +138,8 @@ function fixture(production = false) {
       state.builds++;
       return '';
     }
-    if (is('run jobs describe')) return result(state.jobs[args[3]] ?? missing());
+    if (is('run jobs describe'))
+      return result(state.jobs[args[3]] ?? missing(`Cannot find job [${args[3]}].`));
     if (is('run jobs deploy')) {
       state.jobs[args[3]] = {
         metadata: {
@@ -140,7 +157,8 @@ function fixture(production = false) {
       delete state.jobs[args[3]];
       return '';
     }
-    if (is('run services describe')) return result(state.services[args[3]] ?? missing());
+    if (is('run services describe'))
+      return result(state.services[args[3]] ?? missing(`Cannot find service [${args[3]}].`));
     if (is('run deploy')) {
       const env = JSON.parse(readFileSync(value(args, '--env-vars-file'), 'utf8'));
       state.services[args[2]] = {
@@ -174,6 +192,10 @@ function fixture(production = false) {
   const fetch = async (url, options = {}) => {
     const parsed = new URL(url),
       body = options.body ? JSON.parse(options.body) : undefined;
+    if (parsed.hostname === 'cloudresourcemanager.googleapis.com') {
+      if (parsed.pathname.endsWith(':setIamPolicy')) state.projectPolicy = body.policy;
+      return response(state.projectPolicy);
+    }
     if (parsed.hostname === 'sqladmin.googleapis.com') {
       if (parsed.pathname.endsWith('/instances') && options.method === 'POST') {
         state.sql = {
@@ -348,6 +370,53 @@ it('deploys production with Google secrets, HA SQL and only the gateway public; 
     expect(JSON.stringify(log.mock.calls)).not.toContain('local-secret');
     f.state.sql.settings.availabilityType = 'ZONAL';
     await expect(main(options)).rejects.toThrow('Production Cloud SQL requires HA');
+  } finally {
+    log.mockRestore();
+    f.cleanup();
+  }
+}, 30000);
+
+it('enables HSM with dedicated key-ring permissions and audit logs, without P12 secrets or project-wide KMS grants', async () => {
+  const f = fixture(true);
+  const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+  const path = join(f.workspace, '.env.production');
+  writeFileSync(
+    path,
+    'PSTON_DEPLOY_ENVIRONMENT=production\nPSTON_GCP_PROJECT=example-project\nWEB_ORIGIN=https://sign.example.test\nGOOGLE_CLIENT_ID=test.apps.googleusercontent.com\nGOOGLE_CLIENT_SECRET=fixture\nGOOGLE_ALLOWED_EMAILS=owner@gmail.com\nPSTON_SIGNING_PROVIDER=google-cloud-hsm\n',
+    { mode: 0o600 },
+  );
+  try {
+    const options = {
+      args: ['--env-file', path],
+      workspace: f.workspace,
+      run: f.run,
+      fetch: f.fetch,
+    };
+    await main(options);
+    await main(options);
+    const env = Object.fromEntries(
+      f.state.services['pston-prod-signing'].spec.template.spec.containers[0].env.map(
+        ({ name, value }) => [name, value],
+      ),
+    );
+    expect(env.PSTON_KMS_KEY_RING).toBe(
+      'projects/example-project/locations/asia-southeast1/keyRings/pston-prod-tdid',
+    );
+    expect(env.PSTON_SIGNING_PROVIDER).toBe('google-cloud-hsm');
+    expect(f.state.hsmRole.permissions).toContain('cloudkms.cryptoKeyVersions.useToSign');
+    expect(f.state.hsmRole.permissions).not.toContain('cloudkms.cryptoKeyVersions.destroy');
+    expect(f.state.projectPolicy.auditConfigs).toEqual([
+      {
+        service: 'cloudkms.googleapis.com',
+        auditLogConfigs: [{ logType: 'DATA_READ' }, { logType: 'DATA_WRITE' }],
+      },
+    ]);
+    expect(
+      f.state.commands.filter(
+        (c) => c[0] === 'projects' && c.some((arg) => arg.includes('hsm_signing')),
+      ),
+    ).toEqual([]);
+    expect(JSON.stringify(f.state.secrets)).not.toMatch(/p12|PRIVATE KEY-----.*TDID/s);
   } finally {
     log.mockRestore();
     f.cleanup();

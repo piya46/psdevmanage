@@ -28,14 +28,25 @@ import type {
   SigningRequest,
   Revision,
 } from '../../../packages/core/src/types.js';
-import { DemoSigningProvider } from './provider.js';
+import { DemoSigningProvider, HsmSigningProvider } from './provider.js';
+import { CloudHsm } from './kms.js';
+import {
+  CredentialImports,
+  registerCertificateImports,
+  type SigningCredential,
+} from './credentials.js';
+import { validateSigningTrust } from '../../../packages/core/src/certificate-trust.js';
 const app = await createApp('signing');
 const store = await Store.open('signing');
 databaseReadiness(app, store);
-const provider = new DemoSigningProvider();
+const kms =
+  process.env.PSTON_SIGNING_PROVIDER === 'google-cloud-hsm'
+    ? new CloudHsm(process.env.PSTON_KMS_KEY_RING ?? '')
+    : undefined;
 const results = await BlobStore.open('signing');
 await internalAuth(app, 'signing', ['gateway']);
 startOutbox(store, app);
+if (kms) registerCertificateImports(app, new CredentialImports(store, kms));
 function certificateRecord(
   cert: X509Certificate,
   owner: string,
@@ -61,6 +72,17 @@ function certificateRecord(
 }
 async function certificates(owner: string) {
   const all = await store.list<CertificateProfile>('certificates', owner);
+  for (const cert of all) {
+    if (cert.provider === 'tdid') {
+      const credential = await store.get<SigningCredential>('signing_credentials', cert.id);
+      cert.canSign =
+        !!kms &&
+        credential?.owner === owner &&
+        credential.enabled &&
+        Date.parse(cert.validFrom) <= Date.now() &&
+        Date.now() < Date.parse(cert.validTo);
+    }
+  }
   if (mode === 'demo')
     all.unshift(
       certificateRecord(
@@ -112,7 +134,9 @@ async function manifest(request: SigningRequest) {
       documentDigest: request.documentDigest,
       certificateId: request.certificateId,
       nonce: request.nonce,
-      testOnly: true,
+      testOnly: request.testOnly ?? request.certificateId === 'demo-certificate',
+      keyVersion: request.keyVersion,
+      certificateFingerprint: request.certificateFingerprint,
     },
     Math.max(1, Math.floor((Date.parse(request.expiresAt) - Date.now()) / 1000)),
   );
@@ -121,8 +145,8 @@ app.get('/certificates', async (req) => ({
   certificates: await certificates(actor(req)),
   provider: {
     id: 'tdid',
-    configured: false,
-    message: 'รอยืนยันผลิตภัณฑ์ TDID และวิธีนำเข้ากุญแจหรือ Remote Signing API',
+    configured: !!kms,
+    message: kms ? 'พร้อมนำเข้าใบรับรอง TDID จากไฟล์ P12/PFX' : 'ยังไม่ได้ตั้งค่าระบบลงนาม TDID',
   },
 }));
 app.post('/certificates', async (req) => {
@@ -154,9 +178,10 @@ app.post('/certificates', async (req) => {
 });
 app.get('/security', async (req) => ({
   locked: await locked(actor(req)),
-  provider: mode === 'demo' ? 'demo' : 'unconfigured',
+  provider: kms ? 'google-cloud-hsm' : mode === 'demo' ? 'demo' : 'unconfigured',
   testOnly: mode === 'demo',
-  productionSigningReady: false,
+  productionSigningReady:
+    !!kms && (await certificates(actor(req))).some((cert) => cert.canSign && !cert.testOnly),
 }));
 app.post('/security/lock', async (req) => {
   const owner = actor(req);
@@ -204,7 +229,9 @@ app.post('/signing/prepare', async (req) => {
   }
   const cert = (await certificates(owner)).find((c) => c.id === body.certificateId);
   ensure(
-    cert && cert.canSign && cert.testOnly && mode === 'demo',
+    cert &&
+      cert.canSign &&
+      ((cert.testOnly && mode === 'demo') || (!cert.testOnly && !!kms && mode === 'google')),
     409,
     'CERTIFICATE_CANNOT_SIGN',
     'ใบรับรองนี้ยังไม่มีกุญแจหรือ Signing Provider ที่พร้อมใช้งาน',
@@ -215,6 +242,25 @@ app.post('/signing/prepare', async (req) => {
     'CERTIFICATE_EXPIRED',
     'ใบรับรองหมดอายุหรือยังไม่ถึงวันเริ่มใช้',
   );
+  const credential = !cert.testOnly
+    ? await store.get<SigningCredential>('signing_credentials', cert.id)
+    : undefined;
+  if (!cert.testOnly) {
+    ensure(
+      credential?.owner === owner && credential.enabled && kms,
+      409,
+      'CERTIFICATE_CANNOT_SIGN',
+      'ใบรับรองไม่พร้อมลงนาม',
+    );
+    const trusted = await validateSigningTrust(credential.pem);
+    ensure(
+      sha256(trusted.cert.raw) === cert.fingerprint,
+      409,
+      'CERTIFICATE_MISMATCH',
+      'ใบรับรองไม่ตรงกับกุญแจ',
+    );
+    await kms.checkVersion(credential.keyVersion, trusted.cert, credential.algorithm);
+  }
   const id = randomUUID(),
     createdAt = now();
   await store.insert('idempotency', key, owner, { requestId: id, fingerprint });
@@ -248,6 +294,9 @@ app.post('/signing/prepare', async (req) => {
       state: 'prepared',
       qr: prepared.qr,
       verificationId: prepared.verificationId,
+      testOnly: cert.testOnly,
+      keyVersion: credential?.keyVersion,
+      certificateFingerprint: cert.fingerprint,
     };
     await store.transaction(async () => {
       await store.insert('requests', id, owner, request);
@@ -278,6 +327,14 @@ async function archive(request: SigningRequest, pdf: Buffer) {
     'CERTIFICATE_MISMATCH',
     'Signed certificate mismatch',
   );
+  if (!cert.testOnly) {
+    ensure(
+      validation.trust === 'trusted' && validation.revocation === 'good',
+      409,
+      'SIGNATURE_TRUST_REJECTED',
+      'ผลลงนามไม่ผ่านการตรวจใบรับรองและสถานะเพิกถอน',
+    );
+  }
   ensure(
     !(await locked(request.owner)),
     423,
@@ -321,7 +378,9 @@ app.post<{
       approval.preparedHash === request.preparedHash &&
       approval.documentDigest === request.documentDigest &&
       approval.certificateId === request.certificateId &&
-      approval.nonce === request.nonce,
+      approval.nonce === request.nonce &&
+      approval.keyVersion === request.keyVersion &&
+      approval.certificateFingerprint === request.certificateFingerprint,
     403,
     'APPROVAL_MISMATCH',
     'Approval does not match this document, account or certificate',
@@ -371,6 +430,31 @@ app.post<{
       'Prepared document was changed',
     );
     ensure(!(await locked(owner)), 423, 'SIGNING_LOCKED', 'การลงนามถูกระงับ');
+    const cert = (await certificates(owner)).find((c) => c.id === request.certificateId);
+    ensure(
+      cert?.canSign && (cert.testOnly || approval.method === 'webauthn'),
+      409,
+      'CERTIFICATE_CANNOT_SIGN',
+      'ใบรับรองไม่พร้อมลงนาม',
+    );
+    let provider;
+    if (cert.testOnly) {
+      ensure(mode === 'demo', 403, 'DEMO_ONLY', 'Test signing is disabled');
+      provider = new DemoSigningProvider();
+    } else {
+      const credential = await store.get<SigningCredential>('signing_credentials', cert.id);
+      ensure(
+        kms &&
+          credential?.owner === owner &&
+          credential.enabled &&
+          credential.keyVersion === request.keyVersion &&
+          credential.fingerprint === request.certificateFingerprint,
+        409,
+        'CREDENTIAL_CHANGED',
+        'กุญแจหรือใบรับรองเปลี่ยนหลังอนุมัติ กรุณาเริ่มรายการใหม่',
+      );
+      provider = new HsmSigningProvider(kms, credential);
+    }
     calledProvider = true;
     const pdf = await provider.signPreparedPdf(bytes, new Date(request.createdAt));
     await results.write(request.id, pdf);

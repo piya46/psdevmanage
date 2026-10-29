@@ -1,10 +1,10 @@
 # Deploy Cloud Run ด้วยคำสั่งเดียว
 
-เลือก `production` สำหรับ Google Login + HTTPS หรือ `demo` สำหรับทดลองผ่าน IAM proxy ทั้งสองแบบแยก deployment และข้อมูลกัน **TDID production signing ยังไม่เปิดใช้งาน**
+เลือก `production` สำหรับ Google Login + HTTPS หรือ `demo` สำหรับทดลองผ่าน IAM proxy ทั้งสองแบบแยก deployment และข้อมูลกัน Production รองรับการนำเข้า P12 ผ่านเว็บและลงนามด้วย Google Cloud HSM เมื่อเปิด `PSTON_SIGNING_PROVIDER=google-cloud-hsm`
 
 ## Production: ตั้งค่าครั้งแรก แล้ว deploy ด้วยคำสั่งเดียว
 
-ส่วนนี้เป็น production deployment profile สำหรับพื้นที่จัดเก็บ/เตรียมเอกสาร **ยังไม่ใช่การรับมอบระบบลงนาม TDID ตาม URS** ผู้ใช้มี Project, โดเมน, OAuth Web Client, CER/CRT และแจ้งว่าสร้าง P12 แล้ว แต่ยังไม่ได้ตรวจไฟล์จริง, policy TDID หรือทำ cloud acceptance
+รองรับพื้นที่เอกสารและการลงนาม TDID CA G3 แบบ RSA ผ่าน HSM ผู้ใช้จะนำเข้า P12 ของตนเองในหน้าเว็บ **ยังไม่ใช่การรับมอบ URS ทุกข้อ** โดยเฉพาะ Trusted Timestamp/LTV, recovery และ restore/load acceptance ผล deploy และหลักฐานตรวจจริงดู [สถานะล่าสุด](implementation-status.md)
 
 สร้างไฟล์ตั้งค่าบนเครื่องก่อนครั้งแรก:
 
@@ -38,7 +38,7 @@ npm run deploy:gcp -- --environment production --env-file .env.production
 | Secrets       | แยกสิทธิ์รายบริการ, pin numeric version, ไม่มี test cert/key ใน production                     |
 | Startup       | ปฏิเสธ HTTP origin, SQLite, ขาด credentials/bucket, demo signing หรือ URL ภายในที่ไม่ใช้ HTTPS |
 | Readiness     | /ready ตรวจการเรียกบริการและ query ฐานข้อมูลทั้ง 4 บริการ พร้อม release marker                 |
-| Signing       | ปิดไว้; CER/CRT นำเข้าเพื่อดู metadata ได้; P12 ตรวจบนเครื่องด้วย cert:check                   |
+| Signing       | `google-cloud-hsm`: browser P12 import, HSM RSA-SHA256, Passkey, TDID G3/NRCA chain + CRL; `disabled` ปิดการลงนามจริง |
 
 **ค่าใช้จ่าย:** HA Cloud SQL มีค่าเครื่องหลักและ standby ต่อเนื่อง แม้ Cloud Run scale ลง 0; ยังมีค่า disk/backups และบริการอื่น ค่า HA นี้สูงกว่า demo และเป็น tradeoff กับเป้าหมาย low fixed cost ใน URS สคริปต์ไม่ได้ตั้ง budget alert/hard spending cap ให้ ต้องคำนวณราคาตาม region และตั้ง budget ที่ project ก่อนใช้งานจริง ดู [Cloud SQL HA](https://docs.cloud.google.com/sql/docs/postgres/high-availability) และ [Pricing Calculator](https://cloud.google.com/products/calculator)
 
@@ -81,7 +81,24 @@ npm run cert:check -- --file /absolute/path/certificate.p12 --certificate /absol
 
 กรอกรหัสผ่านเมื่อ OpenSSL ถามใน Terminal (ไม่แสดงตัวอักษร) เครื่องมือตรวจว่ามี private key เดียว, certificate ตรงกับ key และ CER/CRT ที่ระบุ, ไม่ใช่ CA, อยู่ในช่วงอายุ และรายงาน algorithm/fingerprint สาธารณะ พร้อมความเข้ากันได้เบื้องต้นกับ RSA-SHA256 HSM ไม่บันทึก key/password เป็นไฟล์, ไม่เรียก Google Cloud และไม่เปิด signing ส่วนข้อมูลที่ decrypt จะอยู่ชั่วคราวในหน่วยความจำของ process บนเครื่องที่เชื่อถือได้ จึงไม่ใช่การรับรอง secure memory erasure เครื่องมือยังไม่ตรวจ trust chain, KeyUsage/EKU/policy, revocation หรือ TSA
 
-ขั้นต่อไปตาม URS คือยืนยัน TDID อนุญาตให้นำกุญแจไปใช้ใน HSM, ตรวจ certificate policy/algorithm/chain, ใช้ trusted importer แปลงเป็น PKCS#8 DER และ wrap ด้วย Cloud KMS ImportJob ก่อนส่งขึ้น cloud, ผูก certificate กับ key version แบบตายตัว และให้ Signing SA เฉพาะสิทธิ์ asymmetricSign ของ key นั้น ห้ามนำ raw P12/password ไปเก็บใน app env, Secret Manager หรือ API ของแอปแทนขั้นตอนนี้ ปัจจุบันยังไม่มี wrapped importer หรือ HSM signing adapter ใน repo นี้ ดู [Key import](https://docs.cloud.google.com/kms/docs/key-import) และ [Key wrapping](https://docs.cloud.google.com/kms/docs/key-wrapping)
+### นำเข้า P12 ผ่านหน้าเว็บและลงนาม
+
+ตั้ง `PSTON_SIGNING_PROVIDER=google-cloud-hsm` ใน `.env.production` แล้ว deploy ด้วยคำสั่งเดิม สคริปต์เปิด Cloud KMS API, สร้าง key ring `<deployment>-tdid` ใน region เดิม, ให้ Signing service account ใช้ custom role เฉพาะ ring นั้น และเปิด KMS Data Access audit logs โดยเก็บนโยบาย IAM เดิมไว้ การเก็บ key version และเรียก HSM มีค่าใช้จ่ายเพิ่มเติม
+
+1. Login ด้วยบัญชีที่อยู่ใน allowlist แล้วเปิด **ใบรับรองของฉัน → นำเข้า P12 สำหรับลงนาม**
+2. เลือก `.p12/.pfx` ไม่เกิน 2 MB, กรอกรหัสผ่าน และยืนยันว่าเป็นเจ้าของ/ได้รับมอบอำนาจให้ใช้ใบรับรองบนระบบนี้
+3. รอจนใบรับรองแสดง **พร้อมลงนาม** แล้วไป **ศูนย์ความปลอดภัย → ลงทะเบียน Passkey**
+4. เปิด PDF จัดวางและตรวจฉบับสุดท้าย เลือกใบรับรอง ยืนยันด้วย Passkey แล้วดาวน์โหลด PDF ที่ลงนาม
+
+เบราว์เซอร์อ่าน P12 ใน Web Worker ที่แยกจากหน้าเว็บ ตรวจ integrity MAC, key/certificate match และ RSA 2048/3072/4096; wrap PKCS#8 DER ด้วย RSA-OAEP-SHA256 + AES-256-KWP ตาม ImportJob ของ Google รหัสผ่านและ raw P12/private key ไม่ถูกส่งไป API หรือเก็บใน Secret Manager ส่วน server รับเฉพาะใบรับรองสาธารณะและ wrapped payload แล้วไม่นำ payload ไปเก็บใน DB/log การปิด worker และล้าง byte buffers ไม่ใช่การรับประกัน secure memory erasure ของ JavaScript
+
+Server ตรวจใบรับรองกับ production TDID CA G3 และ NRCA G1 ที่ pin ไว้ใน `assets/trust/tdid-g3.json` ตรวจช่วงอายุ, KeyUsage/EKU และ CRL ทั้ง leaf/issuer ก่อนนำเข้าและลงนาม ดึง CRL จาก URL ทางการที่กำหนดไว้เท่านั้น ไม่ตาม URL ที่อยู่ในไฟล์อัปโหลด Cache bytes ไม่เกิน 5 นาทีและตรวจอายุ/ลายเซ็น CRL ด้วย OpenSSL ทุกครั้ง หากตรวจไม่ได้จะไม่ลงนาม ไม่รองรับ certificate จาก CA รุ่นทดสอบหรือ CA อื่นโดยอัตโนมัติ
+
+HSM key เป็น import-only; ผูก certificate fingerprint และ key version กับ owner และ approval manifest แบบตายตัว ตรวจ version ENABLED/protectionLevel HSM, public key และ CRC32C ก่อนใช้ ตรวจลายเซ็นที่ HSM คืนมาก่อนประกอบ CMS/CAdES และตรวจ PDF อีกครั้ง การเรียก sign/import ไม่มี automatic retry เมื่อผลไม่ชัดเจน; หน้า import มี **ตรวจสอบรายการนำเข้าเดิม** และเรียกรายการค้างกลับมาได้เมื่อเปิดหน้าใหม่ ขีดจำกัด import คือ 5 ครั้ง/ชั่วโมง/บัญชี และ 10 ใบรับรองต่อบัญชี
+
+สิทธิ์ runtime จำกัดที่ dedicated key ring และไม่มีสิทธิ์ export/destroy/edit IAM; Signing service ยังต้องมีสิทธิ์ create/import และ sign ใน ring เพื่อรองรับ upload ทางเว็บ การแยก importer เป็นบริการต่างหากและการจัดการวงจร key retention เป็นงานเสริม ไม่ใช่สิ่งที่ระบบนี้ทำแล้ว
+
+ใบรับรองสาธารณะ CER/CRT เพียงอย่างเดียวยังลงนามไม่ได้ รุ่นนี้ใช้เวลาที่ระบบระบุและ **ยังไม่มี TSA/Trusted Timestamp หรือ PAdES-LT/LTA** ผลความเชื่อถือเป็นผลตรวจ ณ ปัจจุบัน ไม่ใช่หลักฐานสถานะย้อนหลัง ณ เวลาลงนาม และยังต้องทดสอบไฟล์ TDID ของผู้ใช้/โปรแกรมอ่าน PDF เป้าหมายจริง ดู [TDID downloads/CP-CPS](https://www.thaidigitalid.com/downloads/), [Key import](https://docs.cloud.google.com/kms/docs/key-import), [Key wrapping](https://docs.cloud.google.com/kms/docs/key-wrapping) และ [KMS signing API](https://docs.cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys.cryptoKeyVersions/asymmetricSign)
 
 ### งานรับมอบก่อนเปิดใช้งานจริง
 
@@ -89,7 +106,7 @@ npm run cert:check -- --file /absolute/path/certificate.p12 --certificate /absol
 - ตั้ง Cloud Monitoring uptime check ที่ /ready, แจ้งเตือน 5xx/latency, DB disk/connections, outbox ค้าง และ Billing budget ให้ทีมรับผิดชอบ; สคริปต์ยังไม่สร้าง alert policies/notification channels
 - ทดสอบ restore SQL+PDF และจับคู่ hash, rollback revision ที่เข้ากันได้กับ schema, บันทึก RPO/RTO และทดสอบ secret rotation/recovery
 - Rate limit ปัจจุบันอยู่ในแต่ละ instance และใช้ peer IP โดยไม่เชื่อ X-Forwarded-For จาก client; ยังไม่ใช่ distributed abuse protection ควรใช้ Load Balancer/Cloud Armor พร้อมปิด ingress ตรงตาม deployment design และทำ load test ก่อนเปิดวงกว้าง
-- ก่อนเปิด TDID signing ต้องผ่าน HSM import/provider, audit KMS, chain/revocation/time policy, independent PDF validator และการรับมอบตาม URS
+- ทดสอบนำเข้า TDID ของผู้ใช้และลงนามผ่าน Passkey จริง ตรวจ PDF ด้วย Acrobat/validator ที่ต้องใช้งาน และกำหนด TSA/LTV/time policy ตามเกณฑ์รับมอบ
 
 ## Demo ผ่าน IAM proxy
 
@@ -201,6 +218,8 @@ gcloud billing projects describe YOUR_PROJECT_ID --format='value(billingEnabled)
 
 สคริปต์หยุดที่ขั้นตอนที่ผิดพลาดและคงข้อมูลไว้ ไม่ rollback หรือลบฐานข้อมูลให้เอง แก้ permission/quota/build ที่รายงานแล้วรันคำสั่งเดิมซ้ำ หาก Cloud SQL ยังสร้างไม่เสร็จให้รอ operation ใน console สำเร็จก่อน หาก init job ล้มเหลวจะคง job ไว้ให้ตรวจ logs; job ใช้ admin secret เฉพาะบัญชี bootstrap
 
+การตรวจ session/readiness หลัง deploy จะลองใหม่แบบจำกัดเมื่อเกิด HTTP 403/408/429/5xx ที่รองรับหรือ network timeout เพื่อรอ IAM/revision พร้อมใช้งาน HTTP 401/404, JSON ที่ผิดรูปแบบ และ mode/release ที่ไม่ตรงยังทำให้หยุด สคริปต์ไม่ใช้ retry นี้กับการสร้างทรัพยากรหรือการลงชื่อเข้าใช้
+
 Cloud Run มี revision เดิมไว้สำหรับเปลี่ยน traffic กลับทาง console การอัปเดตครั้งนี้ใช้ schema แบบสร้างเพิ่มเท่านั้น **การย้อน image ไม่ได้ย้อนข้อมูลในฐาน** ควรสำรองข้อมูลและตรวจ compatibility ก่อนเปลี่ยน schema ในอนาคต Cloud SQL backup กับ object versions ช่วยกู้ข้อมูลได้ แต่ยังไม่มีหลักฐาน restore drill ของระบบนี้
 
 ดู logs ตัวอย่าง (เปลี่ยนชื่อ/region หากเลือกค่าอื่น):
@@ -218,6 +237,6 @@ gcloud run services logs read pston-dev-documents --region asia-southeast1 --pro
 
 มี unit tests สำหรับ PostgreSQL engine ผ่าน PGlite และ SQLite, transaction rollback/outbox/approval concurrency; storage adapter tests สำหรับ create-only PDF objects; mock Google Cloud orchestration สำหรับสร้างครั้งแรก/รันซ้ำและ IAM; API integration และ browser E2E ของ application เส้นทางลงนาม
 
-**ยังไม่ได้ deploy ไปยัง project จริงในรอบนี้** และไม่ได้ทดสอบ Cloud SQL/Cloud Storage/IAM จริง, billing, Cloud Run cold start/load หรือ restore drill การทดสอบ mock ตรวจลำดับและ configuration ของสคริปต์ ไม่ทดแทน cloud acceptance
+Deploy จริงใน `piyawebs` แล้ว: Cloud Run 5 บริการ, Cloud SQL HA, private buckets/secrets และ Scheduler พร้อม; ผ่าน database isolation, service readiness, IAM deny และ frontend/Google redirect smoke checks ดู [หลักฐานและข้อจำกัดล่าสุด](implementation-status.md) ยังไม่ได้ทดสอบ login จนจบด้วยบัญชีจริง, PDF upload/edit บน cloud, load/restore drill หรือ TDID signing การทดสอบ mock ตรวจลำดับและ configuration ของสคริปต์ ไม่ทดแทน cloud acceptance เต็มขอบเขต
 
 อ้างอิง: [Cloud SQL จาก Cloud Run](https://docs.cloud.google.com/sql/docs/postgres/connect-run), [Service-to-service authentication](https://docs.cloud.google.com/run/docs/authenticating/service-to-service), [Private service proxy](https://docs.cloud.google.com/run/docs/authenticating/developers), [Cloud Run limits](https://docs.cloud.google.com/run/quotas), [Cloud Storage preconditions](https://docs.cloud.google.com/storage/docs/request-preconditions)

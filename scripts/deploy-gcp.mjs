@@ -14,6 +14,7 @@ import {
   invocationGraph,
   deploymentEnv,
   assertGatewayPolicy,
+  fetchDeploymentJSON,
 } from './lib/gcp-deploy.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,10 +28,10 @@ Requirements: Node.js 22, gcloud, openssl; an existing project with Billing enab
 and an operator allowed to create resources and manage their IAM policies.
 The first run creates billable resources. Cloud SQL remains billed when idle.
 The default is a private TEST signing environment. Production uses a public HTTPS
-gateway with Google allowlist and HA SQL; TDID signing remains disabled.
+gateway with Google allowlist and HA SQL; google-cloud-hsm enables browser P12 import.
 
   --region REGION   Default: asia-southeast1 (Singapore)
-  --environment ENV demo (default) or production (Google login; TDID signing disabled)
+  --environment ENV demo (default) or production (Google login; optional Cloud HSM)
   --env-file FILE   Read allowlisted deploy values locally; chmod 600 required
   --name NAME       Default: pston-dev / pston-prod; use the same value for updates
   --port PORT       Default: 5180; browser origin and authenticated local proxy
@@ -99,9 +100,7 @@ export async function main({
           access: production
             ? 'public HTTPS gateway + Google allowlist; four private services'
             : 'private Google IAM + local Cloud Run proxy',
-          signing: production
-            ? 'disabled pending TDID HSM integration and acceptance'
-            : 'test certificate only',
+          signing: production ? config.signingProvider : 'test certificate only',
           origin,
           sourceFiles: files,
           note: 'Cloud SQL, storage, builds and requests incur charges; no cloud calls made.',
@@ -132,7 +131,10 @@ export async function main({
       return json(args);
     } catch (error) {
       if (/PERMISSION_DENIED|UNAUTHENTICATED|permission denied/i.test(error.detail)) throw error;
-      if (/NOT_FOUND|was not found|does not exist/i.test(error.detail)) return null;
+      if (
+        /NOT_FOUND|was not found|does not exist|Cannot find (?:job|service) \[/i.test(error.detail)
+      )
+        return null;
       throw error;
     }
   };
@@ -214,6 +216,7 @@ export async function main({
         'iam',
         'cloudscheduler',
         'logging',
+        ...(config.signingProvider === 'google-cloud-hsm' ? ['cloudkms'] : []),
       ].map((s) => `${s}.googleapis.com`),
     ],
     { stdio: 'inherit' },
@@ -286,6 +289,86 @@ export async function main({
         `--description=${marker}`,
         `--display-name=PSTON ${identity}`,
       ]);
+  }
+  let keyRing;
+  if (production && config.signingProvider === 'google-cloud-hsm') {
+    const ringId = `${name}-tdid`;
+    keyRing = `projects/${project}/locations/${region}/keyRings/${ringId}`;
+    const existing = optional(['kms', 'keyrings', 'describe', ringId, '--location', region]);
+    if (!existing) mutate(['kms', 'keyrings', 'create', ringId, '--location', region]);
+    // This app role is scoped to its dedicated key ring, never the entire project.
+    // It cannot destroy/export keys or edit IAM. HSM keys are import-only.
+    const roleId = `${name.replaceAll('-', '_')}_hsm_signing`;
+    const roleName = `projects/${project}/roles/${roleId}`;
+    const role = optional(['iam', 'roles', 'describe', roleId]);
+    if (role && role.description !== marker)
+      throw new Error('HSM role belongs to another deployment');
+    const permissions = [
+      'cloudkms.cryptoKeys.create',
+      'cloudkms.cryptoKeys.get',
+      'cloudkms.cryptoKeyVersions.create',
+      'cloudkms.cryptoKeyVersions.get',
+      'cloudkms.cryptoKeyVersions.list',
+      'cloudkms.cryptoKeyVersions.viewPublicKey',
+      'cloudkms.cryptoKeyVersions.useToSign',
+      'cloudkms.importJobs.create',
+      'cloudkms.importJobs.get',
+      'cloudkms.importJobs.useToImport',
+    ];
+    mutate([
+      'iam',
+      'roles',
+      role ? 'update' : 'create',
+      roleId,
+      '--title=PSTON HSM import and signing',
+      `--description=${marker}`,
+      '--stage=GA',
+      `--permissions=${permissions.join(',')}`,
+    ]);
+    const policyArgs = ['kms', 'keyrings', 'get-iam-policy', ringId, '--location', region];
+    const policy = json(policyArgs);
+    assertPrivatePolicy(policy, 'HSM key ring');
+    if (
+      existing &&
+      policy.bindings?.some((b) =>
+        b.members?.some((m) => m !== `serviceAccount:${sa('signing')}` && m !== operator),
+      )
+    )
+      throw new Error('HSM key ring contains unexpected direct access; review before reuse');
+    mutate([
+      'kms',
+      'keyrings',
+      'add-iam-policy-binding',
+      ringId,
+      '--location',
+      region,
+      `--member=serviceAccount:${sa('signing')}`,
+      `--role=${roleName}`,
+      '--condition=None',
+    ]);
+    // Preserve existing audit settings; enable KMS Data Access logs for import/sign evidence.
+    const projectPolicy = await api(
+      `https://cloudresourcemanager.googleapis.com/v1/projects/${project}:getIamPolicy`,
+      'POST',
+      { options: { requestedPolicyVersion: 3 } },
+    );
+    const auditConfigs = projectPolicy.auditConfigs ?? [];
+    const kmsAudit = auditConfigs.find((c) => c.service === 'cloudkms.googleapis.com') ?? {
+      service: 'cloudkms.googleapis.com',
+      auditLogConfigs: [],
+    };
+    for (const type of ['DATA_READ', 'DATA_WRITE']) {
+      const entry = kmsAudit.auditLogConfigs.find((c) => c.logType === type);
+      if (entry?.exemptedMembers?.includes(`serviceAccount:${sa('signing')}`))
+        throw new Error('Signing service is exempt from KMS audit logging');
+      if (!entry) kmsAudit.auditLogConfigs.push({ logType: type });
+    }
+    if (!auditConfigs.includes(kmsAudit)) auditConfigs.push(kmsAudit);
+    await api(
+      `https://cloudresourcemanager.googleapis.com/v1/projects/${project}:setIamPolicy`,
+      'POST',
+      { policy: { ...projectPolicy, auditConfigs }, updateMask: 'audit_configs,etag' },
+    );
   }
   const repo = optional(['artifacts', 'repositories', 'describe', name, '--location', region]);
   if (repo) assertOwned(repo, config, 'Artifact Registry');
@@ -620,7 +703,7 @@ export async function main({
       HOST: '0.0.0.0',
       NODE_ENV: production ? 'production' : 'development',
       PSTON_MODE: production ? 'google' : 'demo',
-      PSTON_SIGNING_PROVIDER: production ? 'disabled' : 'demo',
+      PSTON_SIGNING_PROVIDER: production ? config.signingProvider : 'demo',
       PSTON_RELEASE: release,
       PSTON_DATA_DIR: '/tmp/pston',
       PSTON_CLOUD_RUN: 'true',
@@ -699,6 +782,7 @@ export async function main({
         secrets.push(`PGPASSWORD=${dbSecrets[service].ref}`);
       }
       if (buckets[service]) env.PSTON_BLOB_BUCKET = buckets[service];
+      if (service === 'signing' && keyRing) env.PSTON_KMS_KEY_RING = keyRing;
       if (service === 'identity' && production) {
         env.GOOGLE_CLIENT_ID = config.google.clientId;
         if (config.google.allowedEmails) env.GOOGLE_ALLOWED_EMAILS = config.google.allowedEmails;
@@ -808,22 +892,18 @@ export async function main({
     console.log('Checking gateway and service-to-service connections…');
     const idToken = gc(['auth', 'print-identity-token']);
     const headers = { authorization: `Bearer ${idToken}` };
-    const sessionResponse = await fetch(`${urls.gateway}/api/session`, {
+    const session = await fetchDeploymentJSON(`${urls.gateway}/api/session`, {
       headers,
-      signal: AbortSignal.timeout(120000),
+      fetch,
     });
-    if (
-      !sessionResponse.ok ||
-      (await sessionResponse.json()).mode !== (production ? 'google' : 'demo')
-    )
+    if (session.mode !== (production ? 'google' : 'demo'))
       throw new Error('Gateway session health check failed');
     if (production) {
-      const readiness = await fetch(`${urls.gateway}/ready`, {
+      const ready = await fetchDeploymentJSON(`${urls.gateway}/ready`, {
         headers,
-        signal: AbortSignal.timeout(120000),
+        fetch,
       });
-      const ready = await readiness.json();
-      if (!readiness.ok || ready.status !== 'ok' || ready.release !== release)
+      if (ready.status !== 'ok' || ready.release !== release)
         throw new Error('Production backend/database readiness check failed');
       const disabledDemo = await fetch(`${urls.gateway}/api/auth/demo`, {
         method: 'POST',
@@ -869,11 +949,8 @@ export async function main({
         json(['run', 'services', 'get-iam-policy', serviceName('gateway'), ...regionFlags]),
         'gateway',
       );
-      const browserReady = await fetch(`${origin}/ready`, {
-        signal: AbortSignal.timeout(120000),
-        redirect: 'error',
-      });
-      if (!browserReady.ok || (await browserReady.json()).release !== release)
+      const browserReady = await fetchDeploymentJSON(`${origin}/ready`, { fetch });
+      if (browserReady.status !== 'ok' || browserReady.release !== release)
         throw new Error(
           'HTTPS domain does not reach this release. Check DNS/load balancer routing to the gateway, then rerun.',
         );

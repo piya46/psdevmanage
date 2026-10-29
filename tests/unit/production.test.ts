@@ -54,6 +54,21 @@ it('fails production startup on demo, missing credentials, wrong redirect or uns
     expect(() => validateProduction({ ...env, ...changes }, 'identity')).toThrow();
   expect(() => validateProduction(env, 'documents')).toThrow('PSTON_BLOB_BUCKET');
   expect(() => validateProduction(env, 'gateway')).toThrow('IDENTITY_URL');
+  expect(() =>
+    validateProduction({ ...env, PSTON_SIGNING_PROVIDER: 'google-cloud-hsm' }, 'signing'),
+  ).toThrow('PSTON_KMS_KEY_RING');
+  expect(() =>
+    validateProduction(
+      {
+        ...env,
+        PSTON_SIGNING_PROVIDER: 'google-cloud-hsm',
+        PSTON_KMS_KEY_RING: 'projects/pston-test/locations/asia-southeast1/keyRings/tdid',
+        PSTON_BLOB_BUCKET: 'test',
+        DOCUMENTS_URL: 'https://documents.example.test',
+      },
+      'signing',
+    ),
+  ).not.toThrow();
 });
 
 it('enforces rate limits on routes declared after createApp, while health probes stay available', async () => {

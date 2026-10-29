@@ -21,6 +21,11 @@ try {
       await admin.query(
         `CREATE ROLE ${identifier(name)} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION PASSWORD ${literal(password)}`,
       );
+    // Managed PostgreSQL's administrator is not a true superuser. PostgreSQL 17
+    // requires SET membership to create a database owned by another role, and
+    // INHERIT membership lets this bootstrap administrator manage its ACLs.
+    // Membership flows from each service role to the administrator, never back.
+    await admin.query(`GRANT ${identifier(name)} TO CURRENT_USER WITH INHERIT TRUE, SET TRUE`);
     const db = await admin.query('SELECT datname FROM pg_database WHERE datname=$1', [name]);
     if (!db.rows.length)
       await admin.query(`CREATE DATABASE ${identifier(name)} OWNER ${identifier(name)}`);
@@ -40,6 +45,18 @@ try {
       await scoped.end();
     }
   }
+  const names = ['identity', 'documents', 'signing', 'audit'].map((service) => `pston_${service}`);
+  const access = await admin.query(
+    `SELECT r.rolname, d.datname, has_database_privilege(r.oid, d.oid, 'CONNECT') AS allowed
+     FROM pg_roles r CROSS JOIN pg_database d
+     WHERE r.rolname = ANY($1::text[]) AND d.datname = ANY($1::text[])`,
+    [names],
+  );
+  if (
+    access.rows.length !== names.length ** 2 ||
+    access.rows.some((row) => row.allowed !== (row.rolname === row.datname))
+  )
+    throw new Error('Service database isolation check failed; review database grants');
   console.log('Four isolated service databases are ready. Existing data and passwords retained.');
 } finally {
   await admin.end();

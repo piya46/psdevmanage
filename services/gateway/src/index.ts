@@ -178,6 +178,10 @@ app.register(async (api) => {
     service: ServiceName;
     target?: string;
   }> = [
+    { method: 'GET', path: '/certificates/imports', service: 'signing' },
+    { method: 'POST', path: '/certificates/imports', service: 'signing' },
+    { method: 'GET', path: '/certificates/imports/:id', service: 'signing' },
+    { method: 'POST', path: '/certificates/imports/:id', service: 'signing' },
     { method: 'GET', path: '/credentials', service: 'identity' },
     { method: 'POST', path: '/webauthn/register/options', service: 'identity' },
     { method: 'POST', path: '/webauthn/register/verify', service: 'identity' },

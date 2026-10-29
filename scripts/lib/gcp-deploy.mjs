@@ -13,6 +13,7 @@ const deploymentKeys = new Set([
   'GOOGLE_CLIENT_SECRET',
   'GOOGLE_ALLOWED_SUBS',
   'GOOGLE_ALLOWED_EMAILS',
+  'PSTON_SIGNING_PROVIDER',
 ]);
 export function deploymentEnv(args, root, env = process.env) {
   const index = args.indexOf('--env-file');
@@ -32,6 +33,49 @@ export function deploymentEnv(args, root, env = process.env) {
 }
 
 export const services = ['gateway', 'identity', 'documents', 'signing', 'audit'];
+
+// IAM bindings and new revisions can take a short time to become usable.
+// Retry only read-only startup probes; never repeat provisioning or login actions.
+export async function fetchDeploymentJSON(
+  url,
+  {
+    headers,
+    fetch = globalThis.fetch,
+    wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    attempts = 12,
+  } = {},
+) {
+  let last = 'network unavailable';
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let response;
+    try {
+      response = await fetch(url, {
+        headers,
+        redirect: 'error',
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch (error) {
+      if (!(error instanceof TypeError) && error.name !== 'TimeoutError') throw error;
+      last = 'network unavailable';
+    }
+    if (response?.ok) {
+      try {
+        return await response.json();
+      } catch {
+        throw new Error(`Deployment check ${new URL(url).pathname} returned invalid JSON`);
+      }
+    }
+    if (response) {
+      last = `HTTP ${response.status}`;
+      await response.body?.cancel();
+      if (![403, 408, 429, 500, 502, 503, 504].includes(response.status))
+        throw new Error(`Deployment check ${new URL(url).pathname} failed (${last})`);
+    }
+    if (attempt + 1 < attempts) await wait(5000);
+  }
+  throw new Error(`Deployment check ${new URL(url).pathname} did not become ready (${last})`);
+}
+
 const sourceRoots = [
   'Dockerfile',
   '.dockerignore',
@@ -101,6 +145,9 @@ export function parseOptions(args, env = process.env) {
   if (!['demo', 'production'].includes(values.environment))
     throw new Error('Environment must be demo or production');
   if (values.environment === 'production') {
+    const signingProvider = env.PSTON_SIGNING_PROVIDER ?? 'disabled';
+    if (!['disabled', 'google-cloud-hsm'].includes(signingProvider))
+      throw new Error('Production PSTON_SIGNING_PROVIDER must be disabled or google-cloud-hsm');
     if (!args.includes('--name') && !env.PSTON_GCP_NAME) values.name = 'pston-prod';
     if (values.mode === 'connect')
       throw new Error('Production uses the HTTPS browser origin, not --connect');
@@ -132,6 +179,7 @@ export function parseOptions(args, env = process.env) {
       port: Number(values.port),
       proxy: false,
       origin: url.origin,
+      signingProvider,
       google: {
         clientId: env.GOOGLE_CLIENT_ID,
         clientSecret: env.GOOGLE_CLIENT_SECRET,

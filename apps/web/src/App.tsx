@@ -56,6 +56,7 @@ import type {
   AuditRecord,
 } from '../../../packages/core/src/types';
 import { api, setCsrf, maxUploadBytes, formatBytes, date, download } from './api';
+import { ImportCertificate } from './ImportCertificate';
 const Editor = lazy(() => import('./Editor').then((module) => ({ default: module.Editor })));
 
 type View = 'documents' | 'certificates' | 'verify' | 'security' | 'audit' | 'trash';
@@ -125,11 +126,11 @@ function Empty({
     </div>
   );
 }
-function Status({ signed }: { signed: boolean }) {
+function Status({ signed, testOnly }: { signed: boolean; testOnly: boolean }) {
   return (
     <span className={`status ${signed ? 'signed' : 'draft'}`}>
       <span />
-      {signed ? 'ลงนามทดสอบแล้ว' : 'แบบร่าง'}
+      {signed ? (testOnly ? 'ลงนามทดสอบแล้ว' : 'ลงนามแล้ว') : 'แบบร่าง'}
     </span>
   );
 }
@@ -148,6 +149,10 @@ function Workspace() {
   const [view, setView] = useState<View>('documents');
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [certificates, setCertificates] = useState<CertificateProfile[]>([]);
+  const [signingProvider, setSigningProvider] = useState({
+    configured: false,
+    message: 'กำลังตรวจสอบระบบลงนาม',
+  });
   const [stats, setStats] = useState({ total: 0, signed: 0, draft: 0, bytes: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -192,11 +197,14 @@ function Workspace() {
         api<{ documents: DocumentRecord[]; stats: typeof stats }>(
           `/documents?scope=${view === 'trash' ? 'trash' : 'active'}`,
         ),
-        api<{ certificates: CertificateProfile[] }>('/certificates'),
+        api<{ certificates: CertificateProfile[]; provider: typeof signingProvider }>(
+          '/certificates',
+        ),
       ]);
       setDocuments(result.documents);
       setStats(result.stats);
       setCertificates(certs.certificates);
+      setSigningProvider(certs.provider);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -452,7 +460,7 @@ function Workspace() {
                         note="ในพื้นที่ส่วนตัว"
                       />
                       <Stat
-                        label="ลงนามทดสอบแล้ว"
+                        label={session.mode === 'demo' ? 'ลงนามทดสอบแล้ว' : 'ลงนามแล้ว'}
                         value={stats.signed.toString()}
                         suffix="เอกสาร"
                         icon={FileCheck2}
@@ -602,7 +610,10 @@ function Workspace() {
                             </div>
                           </button>
                           <div className="document-card-body">
-                            <Status signed={doc.status === 'signed'} />
+                            <Status
+                              signed={doc.status === 'signed'}
+                              testOnly={session.mode === 'demo'}
+                            />
                             <h3>{doc.title}</h3>
                             <p>
                               {doc.pages} หน้า · {formatBytes(doc.bytes)}
@@ -657,7 +668,10 @@ function Workspace() {
                                 </button>
                               </td>
                               <td>
-                                <Status signed={doc.status === 'signed'} />
+                                <Status
+                                  signed={doc.status === 'signed'}
+                                  testOnly={session.mode === 'demo'}
+                                />
                               </td>
                               <td className="date-cell">{date(doc.updatedAt, true)}</td>
                               <td className="size-cell">{formatBytes(doc.bytes)}</td>
@@ -688,12 +702,19 @@ function Workspace() {
                   <ShieldAlert size={14} />
                   {session.mode === 'demo'
                     ? 'โหมดทดลองใช้ใบรับรอง Self-signed สำหรับทดสอบระบบ ยังไม่ใช่การลงนามด้วย TDID'
-                    : 'การลงนาม TDID ยังไม่เปิดใช้งาน ระหว่างรอเชื่อมต่อกุญแจและตรวจรับระบบลงนาม'}
+                    : signingProvider.configured
+                      ? 'นำเข้าใบรับรอง TDID ในหน้าใบรับรองของฉัน แล้วลงทะเบียน Passkey เพื่อยืนยันการลงนาม'
+                      : signingProvider.message}
                 </p>
               </>
             )}
             {view === 'certificates' && (
-              <Certificates items={certificates} toast={toast} onChanged={() => void load()} />
+              <Certificates
+                items={certificates}
+                provider={signingProvider}
+                toast={toast}
+                onChanged={() => void load()}
+              />
             )}
             {view === 'verify' && <VerifyDocuments documents={documents} toast={toast} />}
             {view === 'security' && (
@@ -756,16 +777,15 @@ function Workspace() {
           <p>
             {session?.mode === 'demo'
               ? 'พื้นที่นี้ให้ทดลองอัปโหลด จัดวางองค์ประกอบ ลงนามด้วยใบรับรองทดสอบ และตรวจหลักฐานได้ครบเส้นทาง'
-              : 'จัดเก็บเอกสาร เตรียม PDF และดูข้อมูลใบรับรองของคุณ การลงนามจริงจะเปิดเมื่อผ่านการเชื่อมต่อและตรวจรับแล้ว'}
+              : 'จัดเก็บเอกสาร เตรียม PDF นำเข้าใบรับรอง TDID จาก P12/PFX และอนุมัติการลงนามด้วย Passkey'}
           </p>
           <div className="notice warning">
             {session?.mode === 'demo'
               ? 'ใบรับรองทดสอบไม่ใช่ TDID และไม่ให้หลักฐานเวลาที่รับรองโดย TSA'
-              : 'การเพิ่มใบรับรองสาธารณะยังไม่เชื่อมต่อ private key สำหรับลงนาม'}
+              : 'เลือกนำเข้า P12 สำหรับลงนามเพื่อเชื่อมกุญแจ การเพิ่ม CER/CRT เพียงอย่างเดียวใช้ดูข้อมูลใบรับรอง'}
           </div>
           <p className="muted">
-            การเชื่อม TDID, การนำเข้ากุญแจจริง, การลงนามต่อภายนอก และการรับรอง Production
-            ยังอยู่ระหว่างพัฒนา
+            รุ่นนี้ยังไม่มี Trusted Timestamp และหลักฐานสำหรับตรวจลายเซ็นระยะยาว
           </p>
           <button className="button primary full" onClick={() => setHelp(false)}>
             เข้าใจแล้ว
@@ -1031,14 +1051,17 @@ function Login({
 
 function Certificates({
   items,
+  provider,
   toast,
   onChanged,
 }: {
   items: CertificateProfile[];
+  provider: { configured: boolean; message: string };
   toast: Toast;
   onChanged: () => void;
 }) {
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [label, setLabel] = useState('');
   const [pem, setPem] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1052,10 +1075,18 @@ function Certificates({
           </h1>
           <p>ตรวจสอบข้อมูลใบรับรองและความพร้อมในการลงนาม</p>
         </div>
-        <button className="button primary" onClick={() => setAdding(true)}>
-          <Plus size={17} />
-          เพิ่มใบรับรองสาธารณะ
-        </button>
+        <div className="actions">
+          {provider.configured && (
+            <button className="button primary" onClick={() => setImporting(true)}>
+              <Upload size={17} />
+              นำเข้า P12 สำหรับลงนาม
+            </button>
+          )}
+          <button className="button secondary" onClick={() => setAdding(true)}>
+            <Plus size={17} />
+            เพิ่มใบรับรองสาธารณะ
+          </button>
+        </div>
       </div>
       <div className="certificate-grid">
         {items.map((cert) => (
@@ -1065,7 +1096,11 @@ function Certificates({
                 <ShieldCheck size={27} />
               </span>
               <span className={`status ${cert.testOnly ? 'draft' : 'neutral'}`}>
-                {cert.testOnly ? 'TEST CERTIFICATE' : 'CERTIFICATE ONLY'}
+                {cert.testOnly
+                  ? 'TEST CERTIFICATE'
+                  : cert.canSign
+                    ? 'พร้อมลงนาม'
+                    : 'CERTIFICATE ONLY'}
               </span>
             </div>
             <h2>{cert.label}</h2>
@@ -1081,7 +1116,13 @@ function Certificates({
               </div>
               <div>
                 <dt>ความสามารถ</dt>
-                <dd>{cert.canSign ? 'ลงนามทดสอบได้' : 'ดูข้อมูลเท่านั้น'}</dd>
+                <dd>
+                  {cert.canSign
+                    ? cert.testOnly
+                      ? 'ลงนามทดสอบได้'
+                      : 'ลงนามได้'
+                    : 'ดูข้อมูลเท่านั้น'}
+                </dd>
               </div>
             </dl>
             <div className="hash-card">
@@ -1091,7 +1132,9 @@ function Certificates({
             <div className={`notice ${cert.testOnly ? 'warning' : ''}`}>
               {cert.testOnly
                 ? 'Self-signed สำหรับทดลองระบบ ไม่ใช่ใบรับรองจาก TDID'
-                : 'ไม่มี Private Key ที่เชื่อมกับ Signing Provider จึงยังใช้ลงนามไม่ได้'}
+                : cert.canSign
+                  ? 'กุญแจอยู่ใน Cloud HSM · ยืนยันการลงนามด้วย Passkey'
+                  : 'ไม่มี Private Key ที่เชื่อมกับ Signing Provider จึงยังใช้ลงนามไม่ได้'}
             </div>
           </article>
         ))}
@@ -1099,14 +1142,17 @@ function Certificates({
           <div className="provider-logo">
             TDID<span>THAI DIGITAL ID</span>
           </div>
-          <h2>เชื่อมต่อใบรับรอง TDID</h2>
+          <h2>ลงนามด้วยใบรับรอง TDID</h2>
           <p>
-            รองรับการวางโครงสร้างสำหรับ Cloud HSM หรือ Remote Signing
-            เมื่อยืนยันผลิตภัณฑ์และวิธีเชื่อมต่อแล้ว
+            {provider.configured
+              ? 'นำเข้าไฟล์ P12/PFX เพื่อเก็บกุญแจใน Cloud HSM และใช้ลงนาม PDF'
+              : 'ยังไม่ได้ตั้งค่าระบบลงนาม TDID'}
           </p>
           <span className="status neutral">
             <Clock3 size={13} />
-            รอยืนยันการเชื่อมต่อ
+            {items.some((cert) => cert.canSign && !cert.testOnly)
+              ? 'มีใบรับรองพร้อมลงนาม'
+              : provider.message}
           </span>
           <a
             href="https://www.thaidigitalid.com/product-service/"
@@ -1119,6 +1165,17 @@ function Certificates({
           </a>
         </article>
       </div>
+      {importing && (
+        <Modal title="นำเข้าใบรับรองสำหรับลงนาม" onClose={() => setImporting(false)}>
+          <ImportCertificate
+            onDone={() => {
+              setImporting(false);
+              onChanged();
+              toast('นำเข้าใบรับรองและเชื่อมกุญแจ HSM สำเร็จ');
+            }}
+          />
+        </Modal>
+      )}
       {adding && (
         <Modal title="เพิ่มใบรับรองสาธารณะ" onClose={() => setAdding(false)}>
           <p className="muted small">
@@ -1329,11 +1386,19 @@ function ValidationResult({ result }: { result: Record<string, unknown> }) {
       </div>
       <div>
         <span>ความน่าเชื่อถือของ CA</span>
-        <strong className="amber">ยังไม่รับรอง</strong>
+        <strong className={result.trust === 'trusted' ? 'green' : 'amber'}>
+          {result.trust === 'trusted' ? 'ผ่าน TDID / NRCA' : 'ยังไม่ยืนยัน'}
+        </strong>
       </div>
       <div>
         <span>สถานะเพิกถอน</span>
-        <strong>ยังไม่ได้ตรวจ</strong>
+        <strong>
+          {result.revocation === 'good'
+            ? 'ไม่พบการเพิกถอน ณ เวลาตรวจ'
+            : result.revocation === 'unknown'
+              ? 'ตรวจสอบไม่ได้'
+              : 'ยังไม่ได้ตรวจ'}
+        </strong>
       </div>
       <div>
         <span>Trusted Timestamp</span>
@@ -1356,7 +1421,11 @@ function Security({
   refreshSession: () => Promise<void>;
   toast: Toast;
 }) {
-  const [state, setState] = useState<{ locked: boolean; provider: string } | null>(null);
+  const [state, setState] = useState<{
+    locked: boolean;
+    provider: string;
+    productionSigningReady?: boolean;
+  } | null>(null);
   const [services, setServices] = useState<{ name: string; status: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
@@ -1426,7 +1495,15 @@ function Security({
             หยุดการเริ่มลงนามใหม่ทันทีเมื่อพบเหตุผิดปกติ เอกสารเดิมยังเปิดอ่านและดาวน์โหลดได้
           </p>
           <span className={`status ${state?.locked ? 'draft' : 'signed'}`}>
-            {state?.locked ? 'ระงับอยู่' : state ? 'พร้อมลงนามทดสอบ' : 'กำลังตรวจสถานะ'}
+            {state?.locked
+              ? 'ระงับอยู่'
+              : state
+                ? session.mode === 'demo'
+                  ? 'พร้อมลงนามทดสอบ'
+                  : state.productionSigningReady
+                    ? 'มีใบรับรองพร้อมลงนาม'
+                    : 'ยังไม่มีใบรับรองพร้อมลงนาม'
+                : 'กำลังตรวจสถานะ'}
           </span>
           <button
             className={`button full mt ${state?.locked ? 'secondary' : 'danger-light'}`}
@@ -1638,9 +1715,11 @@ function PublicVerify({ id }: { id: string }) {
           <LoaderCircle className="spin" />
         ) : (
           <section className="content-panel">
-            <div className="notice warning">
-              เอกสารนี้ลงนามด้วยใบรับรองทดสอบ Self-signed ไม่ใช่ TDID
-            </div>
+            {record.testOnly && (
+              <div className="notice warning">
+                เอกสารนี้ลงนามด้วยใบรับรองทดสอบ Self-signed ไม่ใช่ TDID
+              </div>
+            )}
             <dl className="detail-list">
               <div>
                 <dt>บันทึกเมื่อ</dt>
